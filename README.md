@@ -1,6 +1,9 @@
 # AI4reproducibility
 Authors : Jad El Karchi; <jad.el-karchi@u-bordeaux.fr> 
 
+![Python](https://img.shields.io/badge/Python-3.12+-blue)
+![Docker](https://img.shields.io/badge/Docker-29.2.1+-blue)
+
 > AI4Reproducibility is a framework for building agentic AI systems that automatically evaluate the reproducibility of scientific papers.
 
 
