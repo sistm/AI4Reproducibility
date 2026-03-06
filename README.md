@@ -15,9 +15,17 @@ Scientific reproducibility is one of the most important pillars of research inte
 - Difficult to standardize
 
 
-
 ## Goal 
 The project aims mainly to create a pipeline of automated AI agents designed to evaluate the reproducibility of scientific paper submissions. This pipeline provides a detailed assessment of each major criterion involved in determining the research quality and reproducibility standards required for the acceptance of a submitted paper.
+
+## Requirements
+
+To run this project, ensure the following dependencies are installed:
+
+- **Python ≥ 3.12**
+- **Docker ≥ 29.2.1**
+
+Docker is required to create isolated and reproducible execution environments for running experiment validation pipelines.
 
 ## Repository Structure
 ```bash
