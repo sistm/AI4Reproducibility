@@ -53,11 +53,11 @@ ai4reproducibility/
 
 The system uses a multi-agent architecture where each agent specializes in evaluating specific aspects of the paper.
 
-- **Knowledge Extraction Agent** : Understand the context, and extract domain expertise from different assets of the submission, **excluding experiments & code**. Gives a detailed and global understanding on where the paper really stands in research. 
+- **Knowledge Extraction Agent (KBE)** : Understand the context, and extract domain expertise from different assets of the submission, **excluding experiments & code**. Gives a detailed and global understanding on where the paper really stands in research. 
 
-- **Preliminary Code Verification Agent** : Code has an online repository exists, a clear README description, Code matches the described method, Dependencies are documented, Data accessibility, Licensing, versionning...
+- **Code Quality Verification Agent (CQV)** : Code has an online repository exists, a clear README description, Code matches the described method, Dependencies are documented, Data accessibility, Licensing, versionning...
 
-- **Experimental Agent** : Evaluates whether the experiments described in the paper can be reproduced based on the information provided. To support this process, the agent can create a fully isolated code execution environment using **Docker**, enabling safe and controlled validation of the experimental setup.
+- **Experimental Agent (ER) -- Optional --** : Evaluates whether the experiments described in the paper can be reproduced based on the information provided. To support this process, the agent can create a fully isolated code execution environment using **Docker**, enabling safe and controlled validation of the experimental setup.
 
 - **Review Agent** : Uses the outputs produced by the previous agents together with the criteria defined in the `CHECKLIST.md`. Through iterative reasoning and self-critique, the agent evaluates the gathered evidence and generates a comprehensive reproducibility assessment.
 
