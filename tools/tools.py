@@ -52,7 +52,7 @@ TOOLS = {
 
     "pdf2text": {
         "function": pdf2text,
-        "description": "Extract raw text from a PDF file.",
+        "description": "Bash command, Extract raw text from a PDF file.",
         "args": {
             "pdf_path": "Path to PDF"
         }

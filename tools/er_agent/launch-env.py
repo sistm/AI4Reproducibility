@@ -36,14 +36,14 @@ def launch_env(
 
     try:
 
-        if (engine, version) not in supported:
+        if (engine, version) not in SUPPORTED_ENGINES:
             return {
                 "success": False,
                 "container_id": None,
                 "error": f"Unsupported engine/version: {engine} {version}"
             }
 
-        image = supported[(engine, version)]
+        image = SUPPORTED_ENGINES[(engine, version)]
 
         code = Path(code_path).resolve()
         data = Path(data_path).resolve() if data_path else None
@@ -80,7 +80,7 @@ def launch_env(
         run_command = install_cmd + "bash"
 
         docker_cmd = [
-            "docker", "run", "-dit",, "--rm" # remove when stopped
+            "docker", "run", "-dit", "--rm" # remove when stopped
             "-v", f"{code}:/workspace/code:rw",
             "-v", f"{experiment_dir}:/workspace/experiment-run:rw",
         ]
