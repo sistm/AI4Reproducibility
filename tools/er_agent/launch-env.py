@@ -80,7 +80,7 @@ def launch_env(
         run_command = install_cmd + "bash"
 
         docker_cmd = [
-            "docker", "run", "-dit", "--rm" # remove when stopped
+            "docker", "run", "-dit", "--rm",  # remove when stopped
             "-v", f"{code}:/workspace/code:rw",
             "-v", f"{experiment_dir}:/workspace/experiment-run:rw",
         ]

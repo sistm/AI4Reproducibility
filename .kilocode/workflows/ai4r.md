@@ -132,7 +132,9 @@ Produce the **final reproducibility verdict**
 - Perform self-critique loop
 
 **Outputs:**
-- Final report
+- Final review checklist
+- Comprehensive audit reports
+- Fix advices
 - Risk scoring
 - Acceptance recommendation
 - Justified decision

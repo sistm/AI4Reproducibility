@@ -1,7 +1,7 @@
 ---
 name: review
 description: |
-  Review code and data supplements of scientific papers for computational reproducibility. Use when asked to: review a code supplement, check if a paper's code is reproducible, audit a simulation study, evaluate a scientific paper's data and code, or assess computational reproducibility. Actively executes code (fixing minor issues), runs reduced simulations, and compares outputs against reported results. Outputs a structured markdown review document.
+  Review code and data supplements of scientific papers for computational reproducibility. Use when asked to: review a code supplement, check if a paper's code is reproducible, audit a simulation study, evaluate a scientific paper's data and code, or assess computational reproducibility. Actively executes code (fixing minor issues), runs reduced simulations, and compares outputs against reported results. Outputs a structured markdown review checklist.
 ---
 
 # Reproducibility Review
@@ -82,9 +82,9 @@ Compare generated outputs to paper:
 - Text results: numerical claims verified
 - Reduced runs: patterns consistent with full results
 
-### 7. Generate Review
+### 7. Generate Audit Report
 
-Output markdown using template in `assets/review-template.md`.
+Output markdown using template in `assets/audit-report-template.md`.
 
 **Severity levels:**
 - **Critical**: Blocks reproduction (missing code/data, crashes, fundamentally wrong results)
@@ -92,19 +92,23 @@ Output markdown using template in `assets/review-template.md`.
 - **Minor**: Does not block reproduction (style issues, missing but inferable info)
 - **Suggestions**: Best practices not followed
 
+### 8. Fill review checklist
+
+For each item
+- **check only if 100% validated**, or leave unchecked
+- checked items: keep only the short description in bold and delete the details 
+- unchecked items: extend the description of pending issues; emphasize the remaining shortcomings; provide advices and potential fixes 
+
 ## Principles
 
 **Fix before complaining** — If fixable in 30 seconds, fix it and note as minor issue.
-
 **Verify, don't trust** — Run the code. Check outputs. Compare to paper.
-
 **Be constructive** — Goal is helping authors improve their supplement.
-
 **Document thoroughly** — Another reviewer should understand exactly what you did.
-
 **Qualitative over exact** — For reduced runs, patterns and rankings matter more than exact numbers.
 
 ## References
 
-- `references/checklist.md` — Complete checklist for documentation, completeness, organization, quality, reproducibility
-- `assets/review-template.md` — Output template for the review document
+- `references/checklist.md` — Complete checklist for documentation, completeness, organization, quality, reproducibility, and advices to add to the items from the template
+- `assets/audit-report-template.md` — Detailed output template for the audit report document
+- `assets/review-template.md` — Template output for the review checklist
