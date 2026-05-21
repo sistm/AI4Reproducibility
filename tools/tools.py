@@ -73,7 +73,7 @@ TOOLS = {
             "engine": "Runtime engine (python or r)",
             "version": "Engine version",
             "dependencies": "List of (package, version)",
-            "dependency_path" : "path to environment loading (renv, requirements)."
+            "dependency_path": "path to environment loading (renv, requirements).",
             "code_path": "Path to experiment code",
             "data_path": "Optional dataset path"
         }

@@ -1,7 +1,7 @@
 import re
 
 
-def clean_text(raw_text: str) -> dict:
+def clean_pdf_text(raw_text: str) -> dict:
     """
     Clean text extracted from a PDF by removing LaTeX math, commands,
     encoding artifacts, and excessive whitespace while preserving readable text.
