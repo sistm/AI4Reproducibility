@@ -174,11 +174,15 @@ Produce the **final reproducibility verdict**
 
 ### Step 4 — Review Agent
 
-- Merge all outputs
-- Apply checklist
-- Generate final report
+- Merge all outputs from KBE, CQV, and ER agents
+- Apply comprehensive checklist
+- Generate multiple structured outputs:
+  - Executive summary (`final_review.md`)
+  - Exhaustive audit report (`exhaustive_audit_report.md`)
+  - Biometrical Journal compliance checklist (`checklist.md`)
+  - Risk assessment data (`risk_matrix.json`)
 
-→ Save as: `final_review.md`
+→ Save as: `final_review.md`, `exhaustive_audit_report.md`, `checklist.md`, `risk_matrix.json`
 
 ---
 
@@ -238,8 +242,10 @@ All agents must classify findings:
 - Reproducibility blockers
 
 ### Review Output
-- Executive summary
-- Risk score
+- Executive summary (`final_review.md`)
+- Exhaustive audit report (`exhaustive_audit_report.md`)
+- Biometrical Journal compliance checklist (`checklist.md`)
+- Risk score and matrix (`risk_matrix.json`)
 - Detailed findings
 - Final verdict:
   - ACCEPT
@@ -337,6 +343,8 @@ Each review execution MUST create a dedicated folder:
 │
 ├── review/
 │ ├── final_review.md
+│ ├── exhaustive_audit_report.md
+│ ├── checklist.md
 │ └── risk_matrix.json
 │
 └── logs/

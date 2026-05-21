@@ -166,6 +166,14 @@ For every extracted element, answer:
 
 ---
 
+## Output
+
+Structured outputs following the workflow specification:
+- **`kbe_output.json`** - Structured knowledge extraction with atomic knowledge blocks
+- **`notes.md`** - Additional observations and reproducibility gaps
+
+**Output Location:** `/ai4r/{review_title}/kbe/`
+
 ## Workflow
 
 1. **Input**: PDF/LaTeX source of scientific paper

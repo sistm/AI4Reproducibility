@@ -1,7 +1,7 @@
 ---
 name: review
 description: |
-  Review code and data supplements of scientific papers for computational reproducibility. Use when asked to: review a code supplement, check if a paper's code is reproducible, audit a simulation study, evaluate a scientific paper's data and code, or assess computational reproducibility. Actively executes code (fixing minor issues), runs reduced simulations, and compares outputs against reported results. Outputs a structured markdown review checklist.
+  Review code and data supplements of scientific papers for computational reproducibility. Use when asked to: review a code supplement, check if a paper's code is reproducible, audit a simulation study, evaluate a scientific paper's data and code, or assess computational reproducibility. Actively executes code (fixing minor issues), runs reduced simulations, and compares outputs against reported results. Outputs FOUR structured files: final_review.md, exhaustive_audit_report.md, checklist.md, and risk_matrix.json
 ---
 
 # Reproducibility Review
@@ -82,22 +82,47 @@ Compare generated outputs to paper:
 - Text results: numerical claims verified
 - Reduced runs: patterns consistent with full results
 
-### 7. Generate Audit Report
+### 7. Generate Exhaustive Audit Report
 
-Output markdown using template in `assets/audit-report-template.md`.
+Output **`exhaustive_audit_report.md`** using template in `assets/audit-report-template.md`
+- Comprehensive audit report with detailed execution logs
+- Environment setup documentation
+- Code execution results
+- Results verification findings
 
-**Severity levels:**
+### 8. Generate Final Review Summary
+
+Output **`final_review.md`** using template in `references/full-audit-checklist.md`
+- Executive summary with overall assessment
+- Verdict (ACCEPT/MINOR REVISION/MAJOR REVISION/REJECT)
+- Key findings and recommendations
+
+### 9.  Generate Biometrical Journal Essential Checklist
+
+Output **`checklist.md`** using template in `assets/review-template.md`
+- Biometrical Journal essential reproducibility compliance checklist
+- All items checked or documented with explanations
+- list all Critical issues, Major issues, Minor issues, and Suggestions for Improvement
+
+### 10. Generate Risk Matrix
+
+Output **`risk_matrix.json`**
+- Structured risk assessment data
+- Paper title, date, assessment, verdict, risk score (0-100)
+- Lists of issues by severity level
+- Suggestions for improvement
+- Required changes checklist
+
+### 11. Output Location
+
+All outputs saved to: `/ai4r/{review_title}/review/`
+
+**Severity levels:
 - **Critical**: Blocks reproduction (missing code/data, crashes, fundamentally wrong results)
 - **Major**: Significantly impedes reproduction (missing docs, manual steps needed, partial failures)
 - **Minor**: Does not block reproduction (style issues, missing but inferable info)
 - **Suggestions**: Best practices not followed
 
-### 8. Fill review checklist
-
-For each item
-- **check only if 100% validated**, or leave unchecked
-- checked items: keep only the short description in bold and delete the details 
-- unchecked items: extend the description of pending issues; emphasize the remaining shortcomings; provide advices and potential fixes 
 
 ## Principles
 
@@ -109,6 +134,7 @@ For each item
 
 ## References
 
-- `references/checklist.md` — Complete checklist for documentation, completeness, organization, quality, reproducibility, and advices to add to the items from the template
-- `assets/audit-report-template.md` — Detailed output template for the audit report document
-- `assets/review-template.md` — Template output for the review checklist
+- `references/full-audit-checklist.md` — Complete checklist for documentation, completeness, organization, quality, reproducibility, and advices to add to the items from the template
+- `assets/audit-report-template.md` — Detailed output template for the Exhaustive Audit Report document
+- `assets/review-template.md` — Template output for the Biometrical Journal essential Checklist document
+- `references/full-audit-checklist.md` — Template for the Final Review Summary document

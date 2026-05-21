@@ -84,13 +84,11 @@ The R Code Quality Verification Agent performs comprehensive static and semantic
 
 ## Output
 
-Structured review report with:
-- Executive summary
-- Categorized issues by severity
-- Specific line references
-- Remediation suggestions
-- Risk score (0-100)
-- Approval recommendation
+Structured outputs following the workflow specification:
+- **`cqv_output.json`** - Code audit with repository analysis, dependency validation, and reproducibility assessment
+- **`repo_analysis.md`** - Detailed repository analysis and findings
+
+**Output Location:** `/ai4r/{review_title}/cqv/`
 
 ## File References
 
