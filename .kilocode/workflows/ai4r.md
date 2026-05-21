@@ -5,6 +5,7 @@
 This workflow orchestrates a set of specialized AI agents to perform a **rigorous, reproducible, and standardized evaluation of scientific papers**.
 
 The system replaces subjective and inconsistent peer-review practices with:
+
 - Deterministic analysis
 - Structured outputs
 - Explicit risk identification
@@ -16,7 +17,6 @@ The system replaces subjective and inconsistent peer-review practices with:
 
 Pipeline execution is **sequential with controlled context propagation**:
 
-
 INPUT (Paper + Assets)
 ↓
 [KBE Agent] → Domain Understanding
@@ -27,14 +27,18 @@ INPUT (Paper + Assets)
 ↓
 OUTPUT (Structured Report)
 
-
 Optional extension:
     ↓
 
 [ER Agent] → Experimental Reproduction (Dockerized)
 
-
 ---
+
+## 🔩 Logic
+
+This diagram shows in detail the reproducibility check pipeline:
+
+![Pipeline Diagram](assets/ai4re.logic.png)
 
 ## 🧩 AGENT DEFINITIONS
 
@@ -43,15 +47,18 @@ Optional extension:
 **Path:** `agents/knowledge-base-extraction`
 
 **Role:**
+
 - Extract structured scientific knowledge from the paper
 - Ignore code and experiments
 - Build a **semantic representation of the methodology**
 
 **Inputs:**
+
 - Paper (PDF / text)
 - Supplementary materials (non-code)
 
 **Outputs:**
+
 - Structured extraction using domain templates (e.g., biostat/)
 - Identified assumptions
 - Statistical methods
@@ -59,6 +66,7 @@ Optional extension:
 - Reproducibility gaps (non-code)
 
 **Constraints:**
+
 - No summarization
 - No interpretation beyond evidence
 - All claims must map to explicit text
@@ -73,11 +81,13 @@ Optional extension:
 Evaluate the **technical reproducibility of the codebase**
 
 **Inputs:**
+
 - Git repository
 - README
 - Dependency files
 
 **Outputs:**
+
 - Repository audit
 - Code-method alignment analysis
 - Dependency validation
@@ -85,6 +95,7 @@ Evaluate the **technical reproducibility of the codebase**
 - Reproducibility blockers
 
 **Checks include:**
+
 - Project structure
 - Environment reproducibility (renv, requirements.txt, Docker)
 - Data accessibility
@@ -92,27 +103,30 @@ Evaluate the **technical reproducibility of the codebase**
 - Hidden dependencies
 
 ---
-<!-- 
-### X. 🧪 ER — Experiment Run Agent (Optional / Future)
+
+### 3. 🧪 ER — Experiment Run Agent (Optional / Future)
 
 **Path:** `agents/experiment-run`
 
 **Role:**
+
 - Attempt execution of experiments in isolated environments
 
 **Capabilities:**
+
 - Auto-generate Docker environments
 - Install dependencies
 - Run pipelines
 - Compare outputs to reported results
 
 **Status:**
+
 - Disabled by default
-- Plug-and-play integration into workflow -->
+- Plug-and-play integration into workflow
 
 ---
 
-### 3. 🧠 Review Agent
+### 4. 📝 Review Agent
 
 **Path:** `agents/review`
 
@@ -120,21 +134,22 @@ Evaluate the **technical reproducibility of the codebase**
 Produce the **final reproducibility verdict**
 
 **Inputs:**
+
 - KBE outputs
 - CQV outputs
 - (Optional) ER outputs
 - Global CHECKLIST.md
 
 **Process:**
+
 - Cross-validate findings
 - Detect inconsistencies
 - Apply checklist rigorously
 - Perform self-critique loop
 
 **Outputs:**
-- Final review checklist
-- Comprehensive audit reports
-- Fix advices
+
+- Final report
 - Risk scoring
 - Acceptance recommendation
 - Justified decision
@@ -174,15 +189,11 @@ Produce the **final reproducibility verdict**
 
 ### Step 4 — Review Agent
 
-- Merge all outputs from KBE, CQV, and ER agents
-- Apply comprehensive checklist
-- Generate multiple structured outputs:
-  - Executive summary (`final_review.md`)
-  - Exhaustive audit report (`exhaustive_audit_report.md`)
-  - Biometrical Journal compliance checklist (`checklist.md`)
-  - Risk assessment data (`risk_matrix.json`)
+- Merge all outputs
+- Apply checklist
+- Generate final report
 
-→ Save as: `final_review.md`, `exhaustive_audit_report.md`, `checklist.md`, `risk_matrix.json`
+→ Save as: `final_review.md`
 
 ---
 
@@ -190,12 +201,12 @@ Produce the **final reproducibility verdict**
 
 Each agent must operate with **strict scoped context**:
 
-| Agent | Allowed Context |
-|------|----------------|
-| KBE  | Paper only |
-| CQV  | Codebase only |
-| ER   | Code + environment |
-| Review | ALL outputs |
+| Agent  | Allowed Context    |
+|--------|--------------------|
+|  KBE   | Paper only         |
+|  CQV   | Codebase only      |
+|  ER    | Code + environment |
+| Review | ALL outputs        |
 
 ❗ No agent should infer beyond its scope.
 
@@ -204,17 +215,21 @@ Each agent must operate with **strict scoped context**:
 ## 📏 EVALUATION PRINCIPLES
 
 ### 1. Determinism
+
 - Same input → same output
 
 ### 2. Evidence-based reasoning
+
 - Every claim must reference:
   - Extracted data OR
   - Code observation
 
 ### 3. No hallucination tolerance
+
 - Unknown → explicitly marked as missing
 
 ### 4. Conservative judgment
+
 - Missing information = risk
 
 ---
@@ -233,19 +248,26 @@ All agents must classify findings:
 ## 🧱 OUTPUT CONTRACT
 
 ### KBE Output
+
 - Structured knowledge
 - Assumptions
 - Missing elements
 
 ### CQV Output
+
 - Code audit
 - Reproducibility blockers
 
+### ER Output
+
+- Execution logs
+- Output comparisons
+- Environment details
+
 ### Review Output
-- Executive summary (`final_review.md`)
-- Exhaustive audit report (`exhaustive_audit_report.md`)
-- Biometrical Journal compliance checklist (`checklist.md`)
-- Risk score and matrix (`risk_matrix.json`)
+
+- Executive summary
+- Risk score
 - Detailed findings
 - Final verdict:
   - ACCEPT
@@ -302,11 +324,10 @@ The Review Agent must:
 
 Each review execution MUST create a dedicated folder:
 
-
 /ai4r/{review_title}/
 
-
 ### 🔑 Naming Rules
+
 - `{review_title}` must be:
   - Lowercase
   - Kebab-case
@@ -319,37 +340,68 @@ Each review execution MUST create a dedicated folder:
 
 ## 📦 FOLDER STRUCTURE PER RUN
 
-**Note:** Create each folder seperately to avoid bugs.
+**Note:** Create each folder separately to avoid bugs.
 
 /ai4r/{review_title}/
 │
 ├── input/
-│ ├── paper.pdf
-│ ├── metadata.json
-│ └── assets/
+│   ├── paper.pdf
+│   ├── metadata.json
+│   └── assets/
 │
 ├── kbe/
-│ ├── kbe_output.json
-│ └── notes.md
+│   ├── kbe_output.json
+│   └── notes.md
 │
 ├── cqv/
-│ ├── cqv_output.json
-│ └── repo_analysis.md
+│   ├── cqv_output.json
+│   └── repo_analysis.md
 │
 ├── er/ (optional)
-│ ├── er_output.json
-│ ├── dockerfile
-│ └── execution_logs.txt
+│   ├── er_output.json
+│   ├── dockerfile
+│   └── execution_logs.txt
 │
 ├── review/
-│ ├── final_review.md
-│ ├── exhaustive_audit_report.md
-│ ├── checklist.md
-│ └── risk_matrix.json
+│   ├── final_review.md
+│   └── risk_matrix.json
 │
 └── logs/
-├── workflow.log
-└── agent_traces/
+    ├── workflow.log
+    └── agent_traces/
+
+## 🚀 Quick Start
+
+### Create Review Directory
+
+```bash
+mkdir -p ai4r/{review_title}/{input/assets,kbe,cqv,review,er,logs}
+```
+
+### Add Paper and Assets
+
+```bash
+cp paper.pdf ai4r/{review_title}/input/paper.pdf
+cp CodeAndData_supplement_V1.zip ai4r/{review_title}/input/assets/
+```
+
+### Execute Workflow
+
+Run the complete AI4R workflow using the execution script:
+
+```bash
+./assets/execute_workflow.sh <review_title>
+```
+
+All agents should be executed.
+
+### Review Results
+
+```bash
+ls -la ai4r/{review_title}/review/
+```
+
+---
 
 ## 🎯 FINAL OBJECTIVE
 
