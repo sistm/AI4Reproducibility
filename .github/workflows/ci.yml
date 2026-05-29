@@ -35,14 +35,7 @@ jobs:
       - name: Lint (ruff)
         run: |
           ruff check tools/
-
-      - name: Test suite
-        run: |
-          pytest --tb=short
-          EXIT=$?
-          # Exit code 5 = no tests collected (tests/ is intentionally empty for now).
-          # Treat it as success. All other non-zero codes are real failures.
-          # Remove this block once test fixtures are added under tests/.
-          if [ $EXIT -eq 5 ]; then exit 0; fi
-          exit $EXIT
-        shell: bash
+ 
+      # No test suite yet — add tests under tests/ and uncomment the step below.
+      # - name: Test suite
+      #   run: pytest --tb=short
