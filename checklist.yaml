@@ -1,0 +1,443 @@
+# =============================================================================
+# AI4Reproducibility — machine-checkable reproducibility checklist
+# =============================================================================
+# Source of truth for the reproducibility rubric. The human-readable
+# CHECKLIST.md at the repo root is generated from this file via
+# `python tools/checklist_render.py`.
+#
+# Item naming convention:
+#   bj-NN-<slug>         Items from the Biometrical Journal RR checklist
+#   audit-<area>-<slug>  Items derived from agents/review/references/
+#                        full-audit-checklist.md that add concrete
+#                        checkability beyond the BJ prose.
+#
+# Every item MUST declare:
+#   - id, source, category, description
+#   - check_type      ("static" | "dynamic" | "llm")
+#   - tool_id         Python-identifier-shaped name of the implementing
+#                     function (lives in tools/cqv_agent/ once implemented).
+#                     For check_type=llm, tool_id is the name of the
+#                     prompt template the LLM is asked to evaluate against.
+#   - severity        ("critical" | "major" | "minor" | "suggestion")
+#   - evidence_required  list of strings describing what the agent must
+#                        emit as evidence for this item in cqv_output.json
+#                        or risk_matrix.json
+#   - applies_to      list of language tags ("any", "r", "python", "stata",
+#                     "julia", "matlab")
+#
+# Optional fields:
+#   - parent          id of a parent item this refines (typically a BJ item)
+#   - references      list of paths to deep-dive prose docs in the repo
+# =============================================================================
+
+version: "1.0.0"
+source: "Biometrical Journal RR checklist + AI4R extended audit items"
+last_updated: "2026-05-29"
+
+# -----------------------------------------------------------------------------
+# Enumerations referenced by individual items
+# -----------------------------------------------------------------------------
+
+categories:
+  - id: documentation
+    name: "Documentation (README, dependencies, environment)"
+  - id: completeness
+    name: "Completeness of code and data"
+  - id: organization
+    name: "Code organisation"
+  - id: quality
+    name: "Code quality"
+  - id: reproducibility
+    name: "Reproducibility (seeds, paths, environment)"
+  - id: verification
+    name: "Result verification (outputs match paper)"
+  - id: packaging
+    name: "Packaging and delivery"
+
+check_types:
+  - id: static
+    description: "Deterministic check executable by a code tool without LLM."
+  - id: dynamic
+    description: "Requires executing the submission code; deferred to the ER agent."
+  - id: llm
+    description: "Requires LLM judgment; subjective or context-dependent."
+
+severities:
+  - id: critical
+    description: "Blocks reproduction entirely."
+  - id: major
+    description: "Significantly impedes reproduction."
+  - id: minor
+    description: "Does not block reproduction; should be fixed."
+  - id: suggestion
+    description: "Best practice; not strictly required."
+
+# -----------------------------------------------------------------------------
+# Items — Biometrical Journal essential RR checklist (12 items)
+# -----------------------------------------------------------------------------
+
+items:
+
+  - id: bj-01-readme
+    source: bj_essential
+    category: documentation
+    description: >-
+      A README file (README.txt, README.md, or README.pdf) is present at the
+      repository root, including version and dependency information at its
+      end. For R, ideally the output of sessionInfo() after loading all
+      necessary packages.
+    check_type: static
+    tool_id: check_readme_present
+    severity: major
+    evidence_required:
+      - "Path of the README file."
+      - "Presence and location of sessionInfo block (R) or equivalent."
+    applies_to: [any]
+
+  - id: bj-02-run-instructions
+    source: bj_essential
+    category: documentation
+    description: >-
+      The README describes exactly how to run the code (which files in what
+      order), or better yet provides a single main file (e.g. main.R,
+      main.py) that reproduces all results with a single command.
+    check_type: llm
+    tool_id: judge_run_instructions
+    severity: major
+    evidence_required:
+      - "Relevant excerpt from README documenting run order."
+      - "Path to main entry script if one exists."
+    applies_to: [any]
+
+  - id: bj-03-code-and-data
+    source: bj_essential
+    category: completeness
+    description: >-
+      All code and data necessary to reproduce every figure, table, and
+      numerical result in the paper is included. When data cannot be made
+      public, comparable pseudo-data may be provided; original data should
+      then be available privately to RR editors.
+    check_type: llm
+    tool_id: judge_code_data_completeness
+    severity: critical
+    evidence_required:
+      - "Mapping from paper figures/tables to code files."
+      - "Inventory of provided data files (real or pseudo)."
+      - "Statement of restricted-data access path if applicable."
+    applies_to: [any]
+
+  - id: bj-04-results-linked
+    source: bj_essential
+    category: organization
+    description: >-
+      Results from the code are clearly linked to the results in the paper,
+      e.g. by exporting figures and tables to appropriately named files
+      (table1.csv, figure1.pdf).
+    check_type: static
+    tool_id: check_output_naming_convention
+    severity: minor
+    evidence_required:
+      - "List of output files produced and their inferred mapping to manuscript items."
+    applies_to: [any]
+
+  - id: bj-05-runtime-hardware
+    source: bj_essential
+    category: documentation
+    description: >-
+      The README reports the runtime and hardware used for the analyses
+      (order-of-magnitude is sufficient: minutes, hours, days).
+    check_type: llm
+    tool_id: judge_runtime_disclosure
+    severity: minor
+    evidence_required:
+      - "Excerpt from README mentioning runtime/hardware."
+    applies_to: [any]
+
+  - id: bj-06-parallelisation
+    source: bj_essential
+    category: documentation
+    description: >-
+      If the code uses parallelisation, the README states so and explains
+      how to adapt it to the reviewer's setup.
+    check_type: llm
+    tool_id: judge_parallelisation_doc
+    severity: minor
+    evidence_required:
+      - "Excerpt from README discussing parallelism."
+      - "Static evidence of parallel constructs in code (parallel, foreach, multiprocessing, mclapply, future_*)."
+    applies_to: [any]
+
+  - id: bj-07-no-absolute-paths
+    source: bj_essential
+    category: reproducibility
+    description: >-
+      No absolute paths in scripts. Only paths relative to the file or the
+      working directory (when documented). No setwd() in code.
+    check_type: static
+    tool_id: check_absolute_paths
+    severity: major
+    evidence_required:
+      - "List of file:line locations where absolute paths or setwd() appear (empty list if none)."
+    applies_to: [any]
+
+  - id: bj-08-organisation
+    source: bj_essential
+    category: organization
+    description: >-
+      Sensible folder structure, file names, and variable names. Code
+      duplication avoided via functions.
+    check_type: llm
+    tool_id: judge_code_organisation
+    severity: minor
+    evidence_required:
+      - "Directory tree of the repository."
+      - "Examples of duplicated code blocks (or statement that none were found)."
+    applies_to: [any]
+
+  - id: bj-09-helpful-comments
+    source: bj_essential
+    category: documentation
+    description: >-
+      Code includes helpful comments, in particular comments that state
+      which figure/table in the manuscript a block of code produces.
+    check_type: llm
+    tool_id: judge_comment_quality
+    severity: minor
+    evidence_required:
+      - "Examples of comments that link code to manuscript figures/tables."
+      - "Estimated comment density (lines of comment / lines of code)."
+    applies_to: [any]
+
+  - id: bj-10-set-seed
+    source: bj_essential
+    category: reproducibility
+    description: >-
+      All code that uses a random number generator initialises a seed so
+      that results are reproducible.
+    check_type: static
+    tool_id: check_set_seed_scope
+    severity: critical
+    evidence_required:
+      - "List of RNG call sites (sample, rnorm, np.random.*, etc.) and whether each has a set.seed/np.random.seed in scope."
+    applies_to: [r, python]
+
+  - id: bj-11-intermediate-results
+    source: bj_essential
+    category: completeness
+    description: >-
+      For simulations exceeding a few hours on a standard laptop:
+      intermediate results are provided (or files uploaded to Zenodo /
+      figshare / osf.io), OR a reduced-replication setting is documented
+      that allows extrapolation.
+    check_type: llm
+    tool_id: judge_intermediate_results
+    severity: major
+    evidence_required:
+      - "Inventory of intermediate result files in the repository."
+      - "Excerpt from README or external link to data repository."
+      - "Documented reduced-replication setting if present."
+    applies_to: [any]
+
+  - id: bj-12-single-zip
+    source: bj_essential
+    category: packaging
+    description: >-
+      All code, data, and README are contained in one ZIP archive (e.g.
+      Code_and_Data.zip), possibly with subfolders. Archive stripped of
+      unnecessary files.
+    check_type: static
+    tool_id: check_archive_layout
+    severity: minor
+    evidence_required:
+      - "Path of the original ZIP."
+      - "Top-level directory listing after extraction."
+      - "Presence of .DS_Store, __pycache__, .Rhistory or other clutter."
+    applies_to: [any]
+
+  # ---------------------------------------------------------------------------
+  # Items — extended audit items that add concrete checkability
+  # ---------------------------------------------------------------------------
+  # Each one refines a BJ item via `parent`. They produce per-language or
+  # finer-grained evidence than the BJ prose alone allows.
+  # ---------------------------------------------------------------------------
+
+  - id: audit-doc-sessioninfo-r
+    source: audit_extended
+    parent: bj-01-readme
+    category: documentation
+    description: >-
+      For R submissions: the README contains a sessionInfo() block (or
+      equivalent like renv.lock content) with package versions and R
+      version pinned.
+    check_type: static
+    tool_id: check_sessioninfo_block
+    severity: major
+    evidence_required:
+      - "Line range in README containing sessionInfo output, or location of renv.lock."
+    applies_to: [r]
+
+  - id: audit-doc-requirements-python
+    source: audit_extended
+    parent: bj-01-readme
+    category: documentation
+    description: >-
+      For Python submissions: requirements.txt, environment.yml, or
+      equivalent dependency manifest is present at the repository root.
+    check_type: static
+    tool_id: check_python_requirements
+    severity: major
+    evidence_required:
+      - "Path of the dependency manifest."
+      - "Whether versions are pinned (== or >=)."
+    applies_to: [python]
+
+  - id: audit-doc-env-tool
+    source: audit_extended
+    parent: bj-01-readme
+    category: reproducibility
+    description: >-
+      Environment reproducibility tooling is used (Docker, renv, conda env
+      file, uv lockfile). Positive signal; absence is not a failure.
+    check_type: static
+    tool_id: check_environment_tooling
+    severity: suggestion
+    evidence_required:
+      - "Paths of Dockerfile, renv.lock, environment.yml, uv.lock, poetry.lock if present."
+    applies_to: [any]
+
+  - id: audit-org-main-entry-point
+    source: audit_extended
+    parent: bj-02-run-instructions
+    category: organization
+    description: >-
+      A single-entry-point script exists (main.R, master.py, run_all.sh,
+      Makefile). Reduces manual orchestration.
+    check_type: static
+    tool_id: check_main_entry_point
+    severity: minor
+    evidence_required:
+      - "Path of the main entry script if found; otherwise an explicit 'not found' record."
+    applies_to: [any]
+
+  - id: audit-org-file-naming
+    source: audit_extended
+    parent: bj-08-organisation
+    category: organization
+    description: >-
+      File names are descriptive (no x001.R, untitled.py, copy_of_*.py)
+      and contain no spaces.
+    check_type: static
+    tool_id: check_file_naming_hygiene
+    severity: minor
+    evidence_required:
+      - "List of file paths that violate the naming policy (empty list if none)."
+    applies_to: [any]
+
+  - id: audit-qual-no-workspace-clear
+    source: audit_extended
+    parent: bj-09-helpful-comments
+    category: quality
+    description: >-
+      No rm(list=ls()) or equivalent workspace-clearing calls in shipped
+      code. (They mask state bugs and hinder downstream sourcing.)
+    check_type: static
+    tool_id: check_no_workspace_clear
+    severity: minor
+    evidence_required:
+      - "List of file:line locations where workspace clearing occurs."
+    applies_to: [r]
+
+  - id: audit-qual-no-auto-install
+    source: audit_extended
+    parent: bj-01-readme
+    category: quality
+    description: >-
+      No silent automatic package installation in scripts
+      (install.packages(), pip install via subprocess). Dependencies must
+      be declared, not installed at runtime.
+    check_type: static
+    tool_id: check_no_auto_install
+    severity: major
+    evidence_required:
+      - "List of file:line locations where install.packages, devtools::install_*, pip.main, !pip install, subprocess('pip ...') appear."
+    applies_to: [r, python]
+
+  - id: audit-repro-platform-independence
+    source: audit_extended
+    parent: bj-07-no-absolute-paths
+    category: reproducibility
+    description: >-
+      Paths are constructed with platform-independent helpers (file.path()
+      in R, os.path.join / pathlib in Python). No hard-coded "\\" or "/"
+      separators.
+    check_type: static
+    tool_id: check_path_helpers
+    severity: minor
+    evidence_required:
+      - "List of file:line locations with hard-coded separators."
+    applies_to: [r, python]
+
+  - id: audit-repro-seed-documented
+    source: audit_extended
+    parent: bj-10-set-seed
+    category: reproducibility
+    description: >-
+      Seed values are either documented in the README or set in a single
+      easily locatable place (e.g. a config file or top of main script).
+    check_type: llm
+    tool_id: judge_seed_documentation
+    severity: minor
+    evidence_required:
+      - "Locations of all set.seed/np.random.seed calls."
+      - "README excerpts mentioning seed handling."
+    applies_to: [r, python]
+
+  - id: audit-data-restricted-handling
+    source: audit_extended
+    parent: bj-03-code-and-data
+    category: completeness
+    description: >-
+      When the original data cannot be released, pseudo-data of comparable
+      size and structure is provided AND a documented path for reviewers
+      to access the real data (controlled-access portal, accession number,
+      contact) is given.
+    check_type: llm
+    tool_id: judge_restricted_data_handling
+    severity: major
+    evidence_required:
+      - "Inventory of pseudo-data files if present."
+      - "README excerpt explaining restricted-access handling."
+      - "Detected data accessions (GEO/SRA/dbGaP/EGA identifiers) in README or code."
+    applies_to: [any]
+
+  - id: audit-verify-figures-match
+    source: audit_extended
+    parent: bj-03-code-and-data
+    category: verification
+    description: >-
+      When the code is executed (ER agent), generated figures match those
+      in the manuscript visually and/or numerically within tolerance.
+      Deferred to dynamic execution.
+    check_type: dynamic
+    tool_id: run_figure_comparison
+    severity: critical
+    evidence_required:
+      - "Paths of regenerated figures and corresponding manuscript figures."
+      - "Visual or numeric comparison artifact."
+    applies_to: [any]
+
+  - id: audit-verify-tables-match
+    source: audit_extended
+    parent: bj-03-code-and-data
+    category: verification
+    description: >-
+      When the code is executed (ER agent), generated tables match those
+      in the manuscript within rounding tolerance. Deferred to dynamic
+      execution.
+    check_type: dynamic
+    tool_id: run_table_comparison
+    severity: critical
+    evidence_required:
+      - "Paths of regenerated tables and corresponding manuscript tables."
+      - "Per-cell delta report with documented tolerance."
+    applies_to: [any]

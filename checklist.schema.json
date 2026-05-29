@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sistm/AI4Reproducibility/blob/main/checklist.schema.json",
+  "title": "AI4R Reproducibility Checklist",
+  "description": "Source-of-truth schema for the machine-checkable reproducibility checklist.",
+  "type": "object",
+  "required": ["version", "source", "last_updated", "categories", "check_types", "severities", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of the checklist contents."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "last_updated": {
+      "type": "string",
+      "format": "date"
+    },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "additionalProperties": false,
+        "properties": {
+          "id":   { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "name": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "check_types": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "id":          { "type": "string", "enum": ["static", "dynamic", "llm"] },
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "severities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "id":          { "type": "string", "enum": ["critical", "major", "minor", "suggestion"] },
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/checklistItem" }
+    }
+  },
+
+  "$defs": {
+    "checklistItem": {
+      "type": "object",
+      "required": [
+        "id", "source", "category", "description",
+        "check_type", "tool_id", "severity",
+        "evidence_required", "applies_to"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(bj-\\d{2}|audit)-[a-z0-9-]+$",
+          "description": "Stable identifier. bj-NN-* for BJ items, audit-* for derived items."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["bj_essential", "audit_extended"]
+        },
+        "parent": {
+          "type": "string",
+          "pattern": "^bj-\\d{2}-[a-z0-9-]+$",
+          "description": "id of the BJ item this audit item refines. Required for audit items, forbidden for BJ items."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "documentation",
+            "completeness",
+            "organization",
+            "quality",
+            "reproducibility",
+            "verification",
+            "packaging"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 10
+        },
+        "check_type": {
+          "type": "string",
+          "enum": ["static", "dynamic", "llm"]
+        },
+        "tool_id": {
+          "type": "string",
+          "pattern": "^(check|judge|run)_[a-z][a-z0-9_]*$",
+          "description": "Snake_case function name. Prefix indicates check style: check_* (static), judge_* (LLM), run_* (dynamic)."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["critical", "major", "minor", "suggestion"]
+        },
+        "evidence_required": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 5 }
+        },
+        "applies_to": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["any", "r", "python", "stata", "julia", "matlab"]
+          }
+        },
+        "references": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "allOf": [
+        {
+          "if":   { "properties": { "source": { "const": "audit_extended" } } },
+          "then": { "required": ["parent"] }
+        },
+        {
+          "if":   { "properties": { "source": { "const": "bj_essential" } } },
+          "then": { "not": { "required": ["parent"] } }
+        },
+        {
+          "if":   { "properties": { "check_type": { "const": "static" } } },
+          "then": { "properties": { "tool_id": { "pattern": "^check_" } } }
+        },
+        {
+          "if":   { "properties": { "check_type": { "const": "llm" } } },
+          "then": { "properties": { "tool_id": { "pattern": "^judge_" } } }
+        },
+        {
+          "if":   { "properties": { "check_type": { "const": "dynamic" } } },
+          "then": { "properties": { "tool_id": { "pattern": "^run_" } } }
+        }
+      ]
+    }
+  }
+}
