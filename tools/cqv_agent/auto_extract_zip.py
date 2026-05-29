@@ -39,7 +39,7 @@ def auto_extract_zip(review_dir):
         print(f"📦 Extracting {zip_file}...")
         
         try:
-            result = run_tool('extract_zip', zip_path=zip_path)
+            result = run_tool('extract_zip', zip_filepath=zip_path)
             if result.get('success', False):
                 extracted.append(zip_file)
                 print(f"✅ Successfully extracted: {zip_file}")

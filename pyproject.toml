@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai4reproducibility"
+version = "0.1.0"
+description = "Agentic pipeline for automated reproducibility review of scientific papers."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+keywords = [
+    "reproducibility",
+    "peer-review",
+    "agentic-ai",
+    "large-language-models",
+    "biostatistics",
+]
+authors = [
+    { name = "Jad El Karchi", email = "jad.el-karchi@u-bordeaux.fr" },
+    { name = "Boris P. Hejblum", email = "boris.hejblum@u-bordeaux.fr" },
+]
+maintainers = [
+    { name = "Jad El Karchi", email = "jad.el-karchi@u-bordeaux.fr" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+
+# Runtime dependencies. Keep this list lean: it should match what is
+# actually imported by code under tools/ and any future driver scripts.
+# Loose lower bounds are intentional; tighten if you hit incompatibilities.
+dependencies = [
+    "pymupdf>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+# Reserved for the future Experiment Run (ER) agent. The Docker SDK is
+# only needed when ER is enabled at runtime.
+er = [
+    "docker>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/sistm/AI4Reproducibility"
+Repository = "https://github.com/sistm/AI4Reproducibility"
+Issues = "https://github.com/sistm/AI4Reproducibility/issues"
+
+# ---------------------------------------------------------------------------
+# Packaging
+# ---------------------------------------------------------------------------
+# The project is laid out at the repository root rather than under a src/
+# layout. Two top-level directories are shipped:
+#   - ``tools``  : importable Python code (the tool registry and helpers).
+#   - ``agents`` : Markdown SKILL definitions, reference docs, and templates
+#                  that the agents read at runtime. These are not Python
+#                  modules but they MUST be installed alongside the package
+#                  so that ``ai4reproducibility`` works after ``pip install``.
+#
+# For ``agents/`` to ship, it needs an empty ``__init__.py`` (so setuptools
+# treats it as a package) and its non-Python files must be declared under
+# ``package-data`` below.
+
+[tool.setuptools.packages.find]
+include = ["tools*", "agents*"]
+exclude = ["tests*", "ai4r*", "assets*", ".kilocode*"]
+
+[tool.setuptools.package-data]
+# Glob patterns are evaluated relative to each matched package directory.
+# The recursive ``**`` glob captures every depth of subfolder under agents/
+# so that biostat/, references/, and assets/ subtrees are all shipped.
+agents = [
+    "**/*.md",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.json",
+    "**/*.txt",
+]
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = ["E501"]  # let formatter handle line length
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+ignore_missing_imports = true

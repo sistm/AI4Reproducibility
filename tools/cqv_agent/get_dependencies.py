@@ -51,7 +51,7 @@ class DependencyExtractor:
                         for pkg_name, pkg_data in renv_data['Packages'].items():
                             deps.append({
                                 'package': pkg_name,
-                                'version': pkg_data.get('Package', {}).get('Version')
+                                'version': pkg_data.get('Version')
                             })
             except Exception:
                 pass

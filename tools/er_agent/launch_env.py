@@ -12,7 +12,7 @@ def launch_env(
     engine: str,
     version: str,
     dependencies: List[Tuple[str, str]],
-    dependeny_path: str,
+    dependency_path: str,
     code_path: str,
     data_path: str = ""
 ) -> dict:
