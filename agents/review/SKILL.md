@@ -106,12 +106,37 @@ Output **`checklist.md`** using template in `assets/review-template.md`
 
 ### 10. Generate Risk Matrix
 
-Output **`risk_matrix.json`**
-- Structured risk assessment data
-- Paper title, date, assessment, verdict, risk score (0-100)
-- Lists of issues by severity level
-- Suggestions for improvement
-- Required changes checklist
+Output **`risk_matrix.json`** with exactly this schema:
+
+```json
+{
+  "paper_id": "kebab-case-slug-matching-review-title",
+  "paper_title": "Full Human-Readable Title",
+  "assessed_at": "2026-05-29T14:30:00Z",
+  "risk_score": 42,
+  "risk_level": "MEDIUM",
+  "verdict": "MINOR REVISION",
+  "issues": {
+    "critical": [{"id": "C1", "description": "...", "evidence": "ai4r/<slug>/cqv/repo_analysis.md#L42"}],
+    "major":    [{"id": "M1", "description": "...", "evidence": "..."}],
+    "minor":    [{"id": "m1", "description": "...", "evidence": "..."}],
+    "suggestions": [{"id": "S1", "description": "..."}]
+  },
+  "required_changes": [
+    {"id": "R1", "description": "...", "addresses": ["C1"], "done": false}
+  ]
+}
+```
+
+Field constraints:
+- `risk_score` is an integer 0-100 where higher means *less* reproducible.
+- `risk_level` is one of `LOW` (0-25), `MEDIUM` (26-50), `HIGH` (51-75), `CRITICAL` (76-100).
+- `verdict` is exactly one of `ACCEPT`, `MINOR REVISION`, `MAJOR REVISION`, `REJECT`.
+- Every issue object MUST have an `evidence` field pointing to a file path
+  (with optional `#L<line>` anchor) under `ai4r/<review_title>/`. Issues
+  without traceable evidence MUST NOT be included — they belong in the
+  `final_review.md` narrative instead.
+- The `assessed_at` field is an ISO 8601 UTC timestamp.
 
 ### 11. Output Location
 

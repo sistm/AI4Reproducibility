@@ -1,413 +1,218 @@
-# 🧠 AI4R — Automated Scientific Reproducibility Review System
+---
+description: Run the full AI4R reproducibility review pipeline on a submission.
+agent: orchestrator
+---
 
-## 🎯 Purpose
+# AI4R — Reproducibility Review Orchestrator
 
-This workflow orchestrates a set of specialized AI agents to perform a **rigorous, reproducible, and standardized evaluation of scientific papers**.
+You are the AI4R orchestrator. Your job is to drive a four-stage pipeline
+(KBE → CQV → optional ER → Review) over a single paper submission, producing
+a fixed set of structured deliverables on disk.
 
-The system replaces subjective and inconsistent peer-review practices with:
-
-- Deterministic analysis
-- Structured outputs
-- Explicit risk identification
-- Cross-agent validation
+You MUST follow the steps below in order. You MUST NOT skip validation. You
+MUST NOT proceed past a failed step without explicit user confirmation.
 
 ---
 
-## ⚙️ WORKFLOW OVERVIEW
+## ARGUMENTS
 
-Pipeline execution is **sequential with controlled context propagation**:
+This workflow expects ONE argument: `review_title`, a kebab-case slug
+derived from the paper title (e.g. `deep-learning-survival-2026`).
 
-INPUT (Paper + Assets)
-↓
-[KBE Agent] → Domain Understanding
-↓
-[CQV Agent] → Code & Repository Validation
-↓
-[Review Agent] → Final Reproducibility Assessment
-↓
-OUTPUT (Structured Report)
-
-Optional extension:
-    ↓
-
-[ER Agent] → Experimental Reproduction (Dockerized)
+If the user did not provide it in the invocation, use the `question` tool
+to ask for it. Validate that it matches `^[a-z0-9][a-z0-9-]*$` before
+continuing. If it does not, ask again.
 
 ---
 
-## 🔩 Logic
+## STEP 0 — Pre-flight (deterministic, bash)
 
-This diagram shows in detail the reproducibility check pipeline:
-
-![Pipeline Diagram](assets/ai4re.logic.png)
-
-## 🧩 AGENT DEFINITIONS
-
-### 1. 🧬 KBE — Knowledge Base Extraction Agent
-
-**Path:** `agents/knowledge-base-extraction`
-
-**Role:**
-
-- Extract structured scientific knowledge from the paper
-- Ignore code and experiments
-- Build a **semantic representation of the methodology**
-
-**Inputs:**
-
-- Paper (PDF / text)
-- Supplementary materials (non-code)
-
-**Outputs:**
-
-- Structured extraction using domain templates (e.g., biostat/)
-- Identified assumptions
-- Statistical methods
-- Data generation processes
-- Reproducibility gaps (non-code)
-
-**Constraints:**
-
-- No summarization
-- No interpretation beyond evidence
-- All claims must map to explicit text
-
----
-
-### 2. 💻 CQV — Code Quality Verification Agent
-
-**Path:** `agents/code-quality-verification`
-
-**Role:**
-Evaluate the **technical reproducibility of the codebase**
-
-**Inputs:**
-
-- Git repository
-- README
-- Dependency files
-
-**Outputs:**
-
-- Repository audit
-- Code-method alignment analysis
-- Dependency validation
-- Execution readiness assessment
-- Reproducibility blockers
-
-**Checks include:**
-
-- Project structure
-- Environment reproducibility (renv, requirements.txt, Docker)
-- Data accessibility
-- Versioning & licensing
-- Hidden dependencies
-
----
-
-### 3. 🧪 ER — Experiment Run Agent (Optional / Future)
-
-**Path:** `agents/experiment-run`
-
-**Role:**
-
-- Attempt execution of experiments in isolated environments
-
-**Capabilities:**
-
-- Auto-generate Docker environments
-- Install dependencies
-- Run pipelines
-- Compare outputs to reported results
-
-**Status:**
-
-- Disabled by default
-- Plug-and-play integration into workflow
-
----
-
-### 4. 📝 Review Agent
-
-**Path:** `agents/review`
-
-**Role:**
-Produce the **final reproducibility verdict**
-
-**Inputs:**
-
-- KBE outputs
-- CQV outputs
-- (Optional) ER outputs
-- Global CHECKLIST.md
-
-**Process:**
-
-- Cross-validate findings
-- Detect inconsistencies
-- Apply checklist rigorously
-- Perform self-critique loop
-
-**Outputs:**
-
-- Final report
-- Risk scoring
-- Acceptance recommendation
-- Justified decision
-
----
-
-## 🔄 EXECUTION LOGIC
-
-### Step 1 — KBE Execution
-
-- Parse paper
-- Apply domain-specific extraction templates
-- Output structured knowledge artifacts
-
-→ Save as: `kbe_output.json`
-
----
-
-### Step 2 — CQV Execution
-
-- Analyze repository
-- Validate reproducibility of code
-
-→ Save as: `cqv_output.json`
-
----
-
-### Step 3 — (Optional) ER Execution
-
-- Trigger ONLY if:
-  - Code is runnable
-  - Dependencies are resolvable
-
-→ Save as: `er_output.json`
-
----
-
-### Step 4 — Review Agent
-
-- Merge all outputs
-- Apply checklist
-- Generate final report
-
-→ Save as: `final_review.md`
-
----
-
-## 🧠 CONTEXT SHARING STRATEGY
-
-Each agent must operate with **strict scoped context**:
-
-| Agent  | Allowed Context    |
-|--------|--------------------|
-|  KBE   | Paper only         |
-|  CQV   | Codebase only      |
-|  ER    | Code + environment |
-| Review | ALL outputs        |
-
-❗ No agent should infer beyond its scope.
-
----
-
-## 📏 EVALUATION PRINCIPLES
-
-### 1. Determinism
-
-- Same input → same output
-
-### 2. Evidence-based reasoning
-
-- Every claim must reference:
-  - Extracted data OR
-  - Code observation
-
-### 3. No hallucination tolerance
-
-- Unknown → explicitly marked as missing
-
-### 4. Conservative judgment
-
-- Missing information = risk
-
----
-
-## 🚨 RISK MODEL
-
-All agents must classify findings:
-
-- **CRITICAL** → Invalidates reproducibility
-- **HIGH** → Strong reproducibility threat
-- **MEDIUM** → Weakness in rigor
-- **LOW** → Minor issue
-
----
-
-## 🧱 OUTPUT CONTRACT
-
-### KBE Output
-
-- Structured knowledge
-- Assumptions
-- Missing elements
-
-### CQV Output
-
-- Code audit
-- Reproducibility blockers
-
-### ER Output
-
-- Execution logs
-- Output comparisons
-- Environment details
-
-### Review Output
-
-- Executive summary
-- Risk score
-- Detailed findings
-- Final verdict:
-  - ACCEPT
-  - MINOR REVISION
-  - MAJOR REVISION
-  - REJECT
-
----
-
-## 🔌 EXTENSIBILITY
-
-To enable ER Agent:
-
-1. Add to pipeline after CQV
-2. Define trigger conditions
-3. Extend Review Agent inputs
-
-No redesign required.
-
----
-
-## 🧪 FAILURE HANDLING
-
-If any agent fails:
-
-- Log failure explicitly
-- Continue pipeline with degraded context
-- Increase risk level accordingly
-
----
-
-## 🧠 META-REASONING LOOP (Review Agent)
-
-The Review Agent must:
-
-1. Generate initial verdict
-2. Critically re-evaluate:
-   - Missing evidence
-   - Contradictions
-3. Adjust final decision
-
----
-
-## 🛠️ IMPLEMENTATION NOTES (KILO)
-
-- Each agent = independent workflow node
-- Outputs = structured artifacts (JSON + Markdown)
-- Use strict schemas for interoperability
-- Avoid free-form outputs
-
----
-
-## 📁 OUTPUT DIRECTORY STRATEGY (MANDATORY)
-
-Each review execution MUST create a dedicated folder:
-
-/ai4r/{review_title}/
-
-### 🔑 Naming Rules
-
-- `{review_title}` must be:
-  - Lowercase
-  - Kebab-case
-  - Derived from paper title
-  - Example:
-    - "Deep Learning for Survival Analysis"
-    → `deep-learning-survival-analysis`
-
----
-
-## 📦 FOLDER STRUCTURE PER RUN
-
-**Note:** Create each folder separately to avoid bugs.
-
-/ai4r/{review_title}/
-│
-├── input/
-│   ├── paper.pdf
-│   ├── metadata.json
-│   └── assets/
-│
-├── kbe/
-│   ├── kbe_output.json
-│   └── notes.md
-│
-├── cqv/
-│   ├── cqv_output.json
-│   └── repo_analysis.md
-│
-├── er/ (optional)
-│   ├── er_output.json
-│   ├── dockerfile
-│   └── execution_logs.txt
-│
-├── review/
-│   ├── final_review.md
-│   └── risk_matrix.json
-│
-└── logs/
-    ├── workflow.log
-    └── agent_traces/
-
-## 🚀 Quick Start
-
-### Create Review Directory
+Use the `bash` tool to run:
 
 ```bash
-mkdir -p ai4r/{review_title}/{input/assets,kbe,cqv,review,er,logs}
+./assets/prepare_review.sh "<review_title>"
 ```
 
-### Add Paper and Assets
+This script will:
+
+- Verify `ai4r/<review_title>/input/paper.pdf` exists.
+- Create the standard folder layout under `ai4r/<review_title>/`.
+- Extract any `.zip` archives found in `input/assets/`.
+- Write a start-of-run log entry to `logs/workflow.log`.
+
+If the script exits non-zero, STOP. Report the script's stderr to the user
+and ask whether to retry or abort. Do NOT proceed to Step 1.
+
+---
+
+## STEP 1 — KBE: Knowledge Base Extraction
+
+This step MUST run in an isolated sub-agent session so that the paper text
+does not pollute the context of later stages.
+
+Spawn a subtask with the following brief:
+
+> You are the KBE agent. Read `agents/knowledge-base-extraction/SKILL.md`
+> and follow it. Your allowed context is the paper PDF at
+> `ai4r/<review_title>/input/paper.pdf` and the biostat templates under
+> `agents/knowledge-base-extraction/biostat/`. You MUST NOT read any file
+> under `ai4r/<review_title>/input/assets/` or any code repository.
+>
+> Use the `pdf2text` and `clean_pdf_text` tools to ingest the paper. Apply
+> the EXTRACTION_TEMPLATE to produce structured knowledge.
+>
+> Write exactly two files:
+>   - `ai4r/<review_title>/kbe/kbe_output.json` — schema in SKILL.md
+>   - `ai4r/<review_title>/kbe/notes.md` — extraction notes for humans
+>
+> On any failure, still write `kbe_output.json` with
+> `{"status": "failed", "reason": "<short string>", "partial": {...}}`
+> so downstream agents can degrade gracefully.
+
+After the subtask returns, verify both files exist. If either is missing,
+log to `logs/workflow.log` and CONTINUE — downstream agents are expected
+to handle missing KBE outputs.
+
+---
+
+## STEP 2 — CQV: Code Quality Verification
+
+This step MUST also run in an isolated sub-agent session. The CQV agent
+must not see the paper text directly — that bias is what KBE is for.
+
+Spawn a subtask with the following brief:
+
+> You are the CQV agent. Read `agents/code-quality-verification/SKILL.md`
+> and follow it. Your allowed context is the contents of
+> `ai4r/<review_title>/input/assets/` (extracted code repository) and the
+> reference materials under `agents/code-quality-verification/references/`.
+> You MUST NOT read the paper PDF.
+>
+> Run, at minimum:
+>   - `list_files` on the extracted assets directory.
+>   - `get_dependencies` on the repository root.
+>   - Static checks per `references/CHECKLIST.md`.
+>
+> Write exactly two files:
+>   - `ai4r/<review_title>/cqv/cqv_output.json` — schema in SKILL.md
+>   - `ai4r/<review_title>/cqv/repo_analysis.md` — narrative analysis
+>
+> On any failure, still write `cqv_output.json` with the failure schema
+> shown in SKILL.md.
+
+After the subtask returns, verify both files exist. Log status. CONTINUE
+regardless.
+
+---
+
+## STEP 3 — ER: Experiment Run (optional, currently disabled)
+
+ER is not yet implemented. Skip this step unless the environment variable
+`AI4R_ENABLE_ER=1` is set. To check, run:
 
 ```bash
-cp paper.pdf ai4r/{review_title}/input/paper.pdf
-cp CodeAndData_supplement_V1.zip ai4r/{review_title}/input/assets/
+echo "${AI4R_ENABLE_ER:-0}"
 ```
 
-### Execute Workflow
-
-Run the complete AI4R workflow using the execution script:
-
-```bash
-./assets/execute_workflow.sh <review_title>
-```
-
-All agents should be executed.
-
-### Review Results
+If ER is disabled, write a placeholder file so Step 4 knows ER was skipped
+by design rather than crashed:
 
 ```bash
-ls -la ai4r/{review_title}/review/
+mkdir -p "ai4r/<review_title>/er"
+cat > "ai4r/<review_title>/er/er_output.json" <<'EOF'
+{"status": "skipped", "reason": "ER agent not enabled"}
+EOF
 ```
 
 ---
 
-## 🎯 FINAL OBJECTIVE
+## STEP 4 — Review
 
-Deliver a system that:
+This step runs in the MAIN session (no subtask). It needs to read all
+upstream JSONs and apply the audit checklist.
 
-- Standardizes reproducibility review
-- Reduces reviewer workload
-- Increases scientific rigor
-- Enables scalable peer-review automation
+Read, in order:
+  1. `agents/review/SKILL.md`
+  2. `agents/review/references/full-audit-checklist.md`
+  3. `agents/review/assets/audit-report-template.md`
+  4. `agents/review/assets/review-template.md`
+  5. `ai4r/<review_title>/kbe/kbe_output.json`
+  6. `ai4r/<review_title>/cqv/cqv_output.json`
+  7. `ai4r/<review_title>/er/er_output.json`
+
+Follow the Review SKILL strictly. For any upstream output marked
+`status: "failed"` or `status: "skipped"`, follow the SKILL's degraded-input
+handling — do not invent evidence to fill the gap.
+
+Write exactly four files into `ai4r/<review_title>/review/`:
+  - `final_review.md`             — top-level reviewer-facing summary
+  - `exhaustive_audit_report.md`  — full per-item findings
+  - `checklist.md`                — completed checklist with evidence
+  - `risk_matrix.json`            — structured risk scores per item
+
+For `risk_matrix.json`, ensure the schema includes at minimum:
+`paper_id`, `risk_score` (0-100), `risk_level` (CRITICAL/HIGH/MEDIUM/LOW),
+`verdict` (ACCEPT/MINOR REVISION/MAJOR REVISION/REJECT), and a
+`per_item_findings` array. Each finding must reference an evidence file
+path under `ai4r/<review_title>/`.
+
+---
+
+## STEP 5 — Post-flight validation (deterministic, bash)
+
+Use the `bash` tool to run:
+
+```bash
+./assets/validate_review.sh "<review_title>"
+```
+
+This script will:
+- Check that all 8 required output files exist.
+- Validate each JSON file parses and has the required top-level keys.
+- Print a one-line summary per file (PASS/FAIL + size).
+- Exit non-zero if any required file is missing or malformed.
+
+If validation fails, surface the script's output to the user and ask
+whether to re-run any failed stage individually. Do NOT silently exit.
+
+---
+
+## STEP 6 — Report
+
+Report a short summary to the user:
+- Review directory path.
+- Verdict and risk score from `risk_matrix.json`.
+- Any stages that ran in degraded mode (KBE/CQV/ER status fields).
+- Path to `final_review.md`.
+
+Do not paste the full review text into chat — point the user at the file.
+
+---
+
+## CONTEXT-SHARING POLICY (enforced by subtask isolation)
+
+| Stage  | Allowed reads                                                              |
+|--------|-----------------------------------------------------------------------------|
+| KBE    | paper PDF, KBE skill + biostat templates                                    |
+| CQV    | extracted code, CQV skill + references                                      |
+| ER     | extracted code + lockfiles (when enabled)                                   |
+| Review | KBE/CQV/ER outputs, Review skill + audit references                         |
+
+You MUST honor this table by spawning KBE and CQV as subtasks rather than
+running them inline. Inline execution would let paper text contaminate
+code-quality judgment and vice versa, which is the bias the pipeline is
+designed to avoid.
+
+---
+
+## FAILURE PHILOSOPHY
+
+The pipeline favors degraded continuation over hard failure. Specifically:
+
+- An agent that cannot complete its analysis MUST still write its output
+  files with a `status: "failed"` field rather than crashing.
+- Step 5 (`validate_review.sh`) is the only place that can hard-fail the
+  workflow.
+- The Review stage must always produce its four outputs, even if it has
+  only partial upstream evidence — in which case it down-weights its
+  confidence and flags the affected checklist items as Unverified.
