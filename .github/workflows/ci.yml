@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint-and-validate:
+    name: Lint + checklist validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # Install only what the checklist renderer and linter need.
+      # Once pyproject.toml is committed, replace the two lines below with:
+      #   pip install -e ".[dev]"
+      - name: Install dependencies
+        run: |
+          pip install pyyaml jsonschema ruff pytest
+
+      - name: Validate checklists and verify Markdown views are in sync
+        run: |
+          python -m tools.checklist_render --all --check
+
+      - name: Lint (ruff)
+        run: |
+          ruff check tools/
+
+      - name: Test suite
+        run: |
+          pytest --tb=short
+        # Exits 0 even when no tests are collected, so this step does not
+        # fail on an empty tests/ directory. Remove the continue-on-error
+        # line once real tests exist.
+        continue-on-error: true

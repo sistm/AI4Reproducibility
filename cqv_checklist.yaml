@@ -1,0 +1,583 @@
+# =============================================================================
+# AI4Reproducibility — CQV code-quality checklist
+# =============================================================================
+# Source of truth for the code-quality rubric applied by the CQV agent.
+# Distinct from `checklist.yaml` (the reproducibility rubric) and intentionally
+# non-overlapping: items already covered by the reproducibility YAML are listed
+# under `also_enforces:` below rather than duplicated here.
+#
+# The human-readable CQV_CHECKLIST.md is generated from this file via
+# `python tools/checklist_render.py --yaml cqv_checklist.yaml`.
+#
+# Item naming convention:
+#   cqv-<area>-<slug>
+#     area: syntax | struct | data | stat | perf | sec | doc | test | dep | exec
+#
+# Every item declares:
+#   id, category, description, check_type, tool_id, severity,
+#   evidence_required, applies_to
+#
+# Optional:
+#   cross_reference  id of a related item in checklist.yaml (the
+#                    reproducibility rubric). Use sparingly — prefer
+#                    `also_enforces:` at the top level for items CQV runs
+#                    on behalf of the reproducibility checklist.
+# =============================================================================
+
+version: "1.0.0"
+last_updated: "2026-05-29"
+notes: >-
+  Derived from agents/code-quality-verification/references/CHECKLIST.md.
+  Severities are calibrated to research-code norms: testing and performance
+  items default to "suggestion" rather than "minor" because their absence
+  is the norm in scientific software supplements.
+
+# -----------------------------------------------------------------------------
+# CQV reproducibility-checklist responsibilities
+# -----------------------------------------------------------------------------
+# The CQV agent is responsible for running these items from `checklist.yaml`.
+# Their results flow into cqv_output.json so the Review agent has the evidence
+# without having to re-run the same static checks. This block is informational
+# (the renderer surfaces it as a Cross-References section); the bindings are
+# enforced in the CQV SKILL prompt.
+
+also_enforces:
+  - id: bj-07-no-absolute-paths
+    note: "CQV scans scripts for hard-coded absolute paths and setwd() calls."
+  - id: bj-10-set-seed
+    note: "CQV enumerates RNG call sites and verifies set.seed/np.random.seed scope."
+  - id: bj-12-single-zip
+    note: "CQV runs after preflight extraction; reports clutter and layout issues."
+  - id: audit-doc-sessioninfo-r
+    note: "CQV checks for sessionInfo block in README or renv.lock presence (R)."
+  - id: audit-doc-requirements-python
+    note: "CQV checks for requirements.txt / environment.yml (Python)."
+  - id: audit-doc-env-tool
+    note: "CQV inventories Dockerfile, renv.lock, environment.yml, uv.lock, poetry.lock."
+  - id: audit-org-main-entry-point
+    note: "CQV looks for main.R, main.py, master.py, run_all.sh, Makefile."
+  - id: audit-org-file-naming
+    note: "CQV applies the file-naming policy across the repository tree."
+  - id: audit-qual-no-workspace-clear
+    note: "CQV scans for rm(list=ls()) and equivalents (R)."
+  - id: audit-qual-no-auto-install
+    note: "CQV scans for install.packages, devtools::install_*, pip subprocess calls."
+  - id: audit-repro-platform-independence
+    note: "CQV scans for hard-coded path separators vs file.path() / os.path.join()."
+
+# -----------------------------------------------------------------------------
+# Scoring
+# -----------------------------------------------------------------------------
+# How the CQV agent translates per-item findings into an overall code-quality
+# score. The Review agent uses this score as one input to the risk matrix.
+
+scoring:
+  formula: "score = 100 * (n_passed / n_applicable)"
+  notes: >-
+    Items with applies_to incompatible with the detected language are excluded
+    from the denominator. Items marked "suggestion" carry half-weight in the
+    numerator so research code is not penalised for missing production-grade
+    tooling.
+  bands:
+    - range: "90-100"
+      classification: "Low risk"
+      action: "Approve with optional suggestions."
+    - range: "75-89"
+      classification: "Medium risk"
+      action: "Approve with required fixes."
+    - range: "50-74"
+      classification: "High risk"
+      action: "Do not approve until fixes applied."
+    - range: "0-49"
+      classification: "Critical risk"
+      action: "Reject; fundamental redesign needed."
+
+# -----------------------------------------------------------------------------
+# Enumerations
+# -----------------------------------------------------------------------------
+
+categories:
+  - id: syntax
+    name: "Syntax & Correctness"
+  - id: struct
+    name: "Code Structure"
+  - id: data
+    name: "Data Handling"
+  - id: stat
+    name: "Statistical Validity"
+  - id: perf
+    name: "Performance"
+  - id: sec
+    name: "Security"
+  - id: doc
+    name: "Code Documentation"
+  - id: test
+    name: "Testing"
+  - id: dep
+    name: "Dependencies"
+  - id: exec
+    name: "Execution Safety"
+
+check_types:
+  - id: static
+    description: "Deterministic check executable by a code tool without LLM."
+  - id: dynamic
+    description: "Requires executing the submission code; deferred to the ER agent."
+  - id: llm
+    description: "Requires LLM judgment; subjective or context-dependent."
+
+severities:
+  - id: critical
+    description: "Blocks execution or constitutes a security vulnerability."
+  - id: major
+    description: "Significantly impedes reproducibility or correctness."
+  - id: minor
+    description: "Does not block reproduction; should be fixed."
+  - id: suggestion
+    description: "Best practice; not strictly required for research code."
+
+# -----------------------------------------------------------------------------
+# Items
+# -----------------------------------------------------------------------------
+
+items:
+
+  # === Syntax & Correctness =================================================
+
+  - id: cqv-syntax-parse
+    category: syntax
+    description: "Source files parse without syntax errors in the target language."
+    check_type: static
+    tool_id: check_parse_success
+    severity: critical
+    evidence_required:
+      - "List of file:line locations of parse failures (empty list if none)."
+    applies_to: [r, python]
+
+  - id: cqv-syntax-undefined-vars
+    category: syntax
+    description: "No references to undefined variables or functions."
+    check_type: static
+    tool_id: check_undefined_references
+    severity: critical
+    evidence_required:
+      - "List of file:line locations referencing an undefined name."
+    applies_to: [r, python]
+
+  - id: cqv-syntax-function-signatures
+    category: syntax
+    description: "All function calls supply required arguments and match the called signature."
+    check_type: static
+    tool_id: check_function_signatures
+    severity: major
+    evidence_required:
+      - "List of call sites with missing required arguments."
+    applies_to: [r, python]
+
+  - id: cqv-syntax-imports-complete
+    category: syntax
+    description: "Every used package or module is imported before first use."
+    check_type: static
+    tool_id: check_imports_complete
+    severity: major
+    evidence_required:
+      - "List of file:line locations using a name from an uninstalled or unimported package."
+    applies_to: [r, python]
+
+  # === Code Structure =======================================================
+
+  - id: cqv-struct-no-duplication
+    category: struct
+    description: "No copy-pasted code blocks above a duplication threshold (default: 10 lines)."
+    check_type: static
+    tool_id: check_duplicate_code_blocks
+    severity: minor
+    evidence_required:
+      - "List of duplicated block locations and the duplicate counterpart."
+    applies_to: [any]
+
+  - id: cqv-struct-no-dead-code
+    category: struct
+    description: "No unreachable code after return / stop / break statements."
+    check_type: static
+    tool_id: check_dead_code
+    severity: minor
+    evidence_required:
+      - "List of file:line locations of unreachable statements."
+    applies_to: [r, python]
+
+  - id: cqv-struct-no-global-state
+    category: struct
+    description: >-
+      No implicit mutation of global state from inside functions (e.g. R's
+      `<<-` operator, Python global writes without explicit `global`).
+    check_type: static
+    tool_id: check_global_state_mutation
+    severity: major
+    evidence_required:
+      - "List of file:line locations of global-state mutations."
+    applies_to: [r, python]
+
+  # === Data Handling ========================================================
+
+  - id: cqv-data-no-growing-vectors
+    category: data
+    description: >-
+      No vectors grown inside loops via repeated concatenation (R: c(x, ...),
+      rbind in a loop; Python: list.append in tight loops is fine, but
+      np.concatenate in a loop is not).
+    check_type: static
+    tool_id: check_growing_vectors
+    severity: minor
+    evidence_required:
+      - "List of file:line locations of growing-vector patterns."
+    applies_to: [r, python]
+
+  - id: cqv-data-no-unexpected-mutation
+    category: data
+    description: >-
+      Data-frame mutations are explicit and intentional; no surprising
+      side-effects of helper functions on caller-side state.
+    check_type: llm
+    tool_id: judge_dataframe_mutation
+    severity: minor
+    evidence_required:
+      - "Examples of functions that mutate their arguments without documentation."
+    applies_to: [r, python]
+
+  - id: cqv-data-explicit-types
+    category: data
+    description: "Column types are explicitly declared or coerced rather than left to inference."
+    check_type: llm
+    tool_id: judge_type_handling
+    severity: minor
+    evidence_required:
+      - "Examples of data-loading code with explicit type declarations or coercions."
+    applies_to: [r, python]
+
+  - id: cqv-data-na-handling
+    category: data
+    description: >-
+      Missing values are handled explicitly (na.rm, na.omit, dropna, pd.NA
+      checks). No implicit NA propagation in critical computations.
+    check_type: llm
+    tool_id: judge_na_handling
+    severity: major
+    evidence_required:
+      - "Examples of explicit NA handling in numerical or modelling code."
+      - "Locations where NA handling appears absent in code that could encounter missing values."
+    applies_to: [r, python]
+
+  - id: cqv-data-no-attach
+    category: data
+    description: "No use of R's attach() function — it pollutes the search path and obscures sourcing."
+    check_type: static
+    tool_id: check_no_attach
+    severity: major
+    evidence_required:
+      - "List of file:line locations of attach() calls (empty list if none)."
+    applies_to: [r]
+
+  # === Statistical Validity =================================================
+
+  - id: cqv-stat-test-assumptions
+    category: stat
+    description: >-
+      Statistical tests are applied in contexts where their assumptions
+      (normality, independence, homoscedasticity, etc.) are either justified
+      or checked. CQV reports the assumption set per test invocation.
+    check_type: llm
+    tool_id: judge_test_assumptions
+    severity: major
+    evidence_required:
+      - "List of statistical test calls and their assumption justification (or lack thereof)."
+    applies_to: [r, python]
+
+  - id: cqv-stat-multiple-testing
+    category: stat
+    description: >-
+      When multiple hypothesis tests are run, an appropriate correction is
+      applied (Bonferroni, BH/FDR, Holm) or the choice is justified.
+    check_type: llm
+    tool_id: judge_multiple_testing_correction
+    severity: major
+    evidence_required:
+      - "Count of distinct test calls and presence of correction code (p.adjust, statsmodels.stats.multitest)."
+    applies_to: [r, python]
+
+  - id: cqv-stat-no-data-leakage
+    category: stat
+    description: >-
+      No data leakage between training, validation, and test splits. Feature
+      computation, scaling, and imputation are fit on training data only.
+    check_type: llm
+    tool_id: judge_data_leakage
+    severity: critical
+    evidence_required:
+      - "Examples of where train/test splitting happens relative to feature engineering."
+      - "Examples of scalers / imputers fit and applied."
+    applies_to: [r, python]
+
+  - id: cqv-stat-ci-coverage
+    category: stat
+    description: >-
+      Confidence intervals are constructed by a method appropriate for the
+      estimand (asymptotic, bootstrap, profile, simulation-based).
+    check_type: llm
+    tool_id: judge_ci_construction
+    severity: major
+    evidence_required:
+      - "Locations of confidence-interval computations and the method used."
+    applies_to: [r, python]
+
+  - id: cqv-stat-representative-sampling
+    category: stat
+    description: >-
+      The sampling procedure produces a representative sample for the claimed
+      target population, or any departures are documented.
+    check_type: llm
+    tool_id: judge_sampling_representativeness
+    severity: major
+    evidence_required:
+      - "Description of the sampling procedure and target population from code + README."
+    applies_to: [any]
+
+  - id: cqv-stat-no-post-hoc
+    category: stat
+    description: >-
+      No undocumented post-hoc adjustment of hypotheses, model
+      specifications, or inclusion criteria after seeing results.
+    check_type: llm
+    tool_id: judge_no_post_hoc_adjustment
+    severity: major
+    evidence_required:
+      - "Comparison between pre-registered or documented analysis plan and the executed pipeline."
+    applies_to: [any]
+
+  - id: cqv-stat-model-diagnostics
+    category: stat
+    description: >-
+      Fitted models include diagnostic checks (residuals, calibration, link
+      assumptions) where appropriate for the model class.
+    check_type: llm
+    tool_id: judge_model_diagnostics
+    severity: minor
+    evidence_required:
+      - "List of fitted-model objects and the diagnostic code applied to each."
+    applies_to: [r, python]
+
+  # === Performance ==========================================================
+
+  - id: cqv-perf-no-redundant-copies
+    category: perf
+    description: "No avoidable copies of large data objects (e.g. unnecessary `data <- data` patterns)."
+    check_type: llm
+    tool_id: judge_object_copying
+    severity: suggestion
+    evidence_required:
+      - "Examples of avoidable object copies in the hot path."
+    applies_to: [r, python]
+
+  - id: cqv-perf-loop-invariants
+    category: perf
+    description: "Expensive operations are hoisted out of loops rather than repeated each iteration."
+    check_type: static
+    tool_id: check_loop_invariants
+    severity: suggestion
+    evidence_required:
+      - "List of loops with operations that could be hoisted."
+    applies_to: [r, python]
+
+  # === Security =============================================================
+
+  - id: cqv-sec-no-eval
+    category: sec
+    description: >-
+      No use of eval(), parse(), exec(), or equivalent dynamic-code execution
+      on untrusted strings. Even on trusted strings these are red flags.
+    check_type: static
+    tool_id: check_no_eval_parse
+    severity: critical
+    evidence_required:
+      - "List of file:line locations of eval/parse/exec calls."
+    applies_to: [r, python]
+
+  - id: cqv-sec-no-system-calls
+    category: sec
+    description: >-
+      No shell-command execution with unsanitized inputs (R: system, system2,
+      shell; Python: os.system, subprocess.* with shell=True and interpolated
+      strings).
+    check_type: static
+    tool_id: check_no_system_calls
+    severity: critical
+    evidence_required:
+      - "List of file:line locations of shell calls and whether inputs are interpolated."
+    applies_to: [r, python]
+
+  - id: cqv-sec-no-hardcoded-secrets
+    category: sec
+    description: >-
+      No hardcoded passwords, API keys, tokens, or DB connection strings in
+      shipped code.
+    check_type: static
+    tool_id: check_no_hardcoded_secrets
+    severity: critical
+    evidence_required:
+      - "List of file:line locations matching common secret patterns (regex sweep)."
+    applies_to: [any]
+
+  - id: cqv-sec-path-sanitization
+    category: sec
+    description: >-
+      File paths constructed from external inputs are validated (no ../ path
+      traversal, no symlink escape from the working directory).
+    check_type: llm
+    tool_id: judge_path_sanitization
+    severity: major
+    evidence_required:
+      - "Examples of paths built from external inputs and their validation."
+    applies_to: [r, python]
+
+  - id: cqv-sec-no-arbitrary-downloads
+    category: sec
+    description: >-
+      No code that downloads from arbitrary URLs at runtime (R: download.file
+      to unpinned URLs; Python: urllib/requests calls in the analysis hot
+      path).
+    check_type: static
+    tool_id: check_no_arbitrary_downloads
+    severity: major
+    evidence_required:
+      - "List of network-fetching call sites and the URLs (literal or computed)."
+    applies_to: [r, python]
+
+  - id: cqv-sec-no-unsafe-deserialization
+    category: sec
+    description: >-
+      No deserialization of untrusted serialized objects (R: readRDS from
+      external sources; Python: pickle.loads from external sources).
+    check_type: static
+    tool_id: check_no_unsafe_deserialization
+    severity: major
+    evidence_required:
+      - "List of deserialization call sites and the data origin (bundled / fetched / user-provided)."
+    applies_to: [r, python]
+
+  # === Code Documentation ===================================================
+
+  - id: cqv-doc-function-docs-present
+    category: doc
+    description: >-
+      Functions intended for reuse have docstrings or roxygen documentation
+      blocks (`#'` in R, triple-quoted strings in Python).
+    check_type: static
+    tool_id: check_function_docs_present
+    severity: minor
+    evidence_required:
+      - "Count of documented vs undocumented user-defined functions."
+    applies_to: [r, python]
+
+  - id: cqv-doc-docstring-format
+    category: doc
+    description: >-
+      Where docstrings exist, they include argument descriptions, return
+      values, and any side effects.
+    check_type: llm
+    tool_id: judge_docstring_quality
+    severity: minor
+    evidence_required:
+      - "Sample of docstrings and an assessment of their information content."
+    applies_to: [r, python]
+
+  # === Testing ==============================================================
+
+  - id: cqv-test-suite-exists
+    category: test
+    description: >-
+      A test directory or test file exists at conventional locations
+      (`tests/`, `test/`, `tests_that.R` files for R; `test_*.py` or
+      `*_test.py` for Python).
+    check_type: static
+    tool_id: check_test_directory_present
+    severity: suggestion
+    evidence_required:
+      - "Path of the test directory or test files if any; otherwise an explicit absence record."
+    applies_to: [r, python]
+
+  - id: cqv-test-edge-cases
+    category: test
+    description: >-
+      Where tests exist, they cover edge cases (empty inputs, NAs / NaNs,
+      zero-length, boundary numeric values).
+    check_type: llm
+    tool_id: judge_edge_case_coverage
+    severity: suggestion
+    evidence_required:
+      - "Sample of test code and an assessment of edge-case coverage."
+    applies_to: [r, python]
+
+  - id: cqv-test-integration
+    category: test
+    description: >-
+      Where the package is non-trivial, integration tests cover the main
+      pipeline end-to-end on a small fixture dataset.
+    check_type: llm
+    tool_id: judge_integration_test_coverage
+    severity: suggestion
+    evidence_required:
+      - "Existence and scope of integration tests."
+    applies_to: [r, python]
+
+  # === Dependencies =========================================================
+
+  - id: cqv-dep-versions-pinned
+    category: dep
+    description: >-
+      Declared dependencies pin minimum versions (renv.lock, requirements.txt
+      with ==, or environment.yml). Unpinned dependencies are tolerated only
+      with a documented rationale.
+    check_type: static
+    tool_id: check_version_pinning
+    severity: major
+    evidence_required:
+      - "Per-dependency report: package name, declared version constraint (or 'unpinned')."
+    applies_to: [r, python]
+
+  - id: cqv-dep-no-deprecated
+    category: dep
+    description: >-
+      No use of packages marked deprecated by the language ecosystem
+      (CRAN-archived; Python deprecated APIs).
+    check_type: llm
+    tool_id: judge_deprecated_packages
+    severity: suggestion
+    evidence_required:
+      - "List of imported packages with deprecation status checked against ecosystem registries."
+    applies_to: [r, python]
+
+  # === Execution Safety =====================================================
+
+  - id: cqv-exec-error-handling
+    category: exec
+    description: >-
+      Operations that can fail (file IO, network, optimisation convergence)
+      are wrapped in error handling (tryCatch / try-except).
+    check_type: static
+    tool_id: check_error_handling_coverage
+    severity: minor
+    evidence_required:
+      - "List of file:line locations of risky operations and whether they are wrapped."
+    applies_to: [r, python]
+
+  - id: cqv-exec-no-infinite-loops
+    category: exec
+    description: >-
+      No loops that can run unboundedly without a termination guard
+      (max iteration count, convergence check, timeout).
+    check_type: static
+    tool_id: check_no_unbounded_loops
+    severity: major
+    evidence_required:
+      - "List of loops without a clear termination condition."
+    applies_to: [r, python]
