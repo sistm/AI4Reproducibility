@@ -39,7 +39,3 @@ jobs:
       - name: Test suite
         run: |
           pytest --tb=short
-        # Exits 0 even when no tests are collected, so this step does not
-        # fail on an empty tests/ directory. Remove the continue-on-error
-        # line once real tests exist.
-        continue-on-error: true
