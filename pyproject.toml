@@ -107,7 +107,7 @@ ignore = ["E501"]  # let formatter handle line length
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --exit-zero-on-no-tests"
+addopts = "-ra --strict-markers"
 
 [tool.mypy]
 python_version = "3.12"

@@ -38,4 +38,4 @@ jobs:
 
       - name: Test suite
         run: |
-          pytest --tb=short
+          pytest --tb=short; code=$?; if [ $code -eq 5 ]; then exit 0; else exit $code; fi
