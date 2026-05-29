@@ -53,7 +53,7 @@ declare -A REQUIRED_KEYS=(
     ["kbe/kbe_output.json"]="paper_id status"
     ["cqv/cqv_output.json"]="paper_id status"
     ["er/er_output.json"]="status"
-    ["review/risk_matrix.json"]="paper_id paper_title assessed_at assessment_status verdict issues required_changes upstream_status"
+    ["review/risk_matrix.json"]="paper_id paper_title assessed_at assessment_status risk_score risk_level verdict issues required_changes upstream_status"
 )
 
 # ---------------------------------------------------------------------------

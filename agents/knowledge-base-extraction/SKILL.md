@@ -174,6 +174,8 @@ Structured outputs following the workflow specification:
 
 **Output Location:** `/ai4r/{review_title}/kbe/`
 
+---
+
 ## Workflow
 
 1. **Input**: PDF/LaTeX source of scientific paper
@@ -192,3 +194,92 @@ Structured outputs following the workflow specification:
 - **Precision**: Correctness of extracted entities
 - **Gap Detection Rate**: % of reproducibility gaps identified
 - **Risk Classification Accuracy**: Alignment with expert judgment
+
+---
+
+## Failure Handling
+
+The KBE agent MUST always produce its two output files (`kbe_output.json`
+and `notes.md`) even when extraction fails. Downstream agents and the
+post-flight validator depend on the files being present and well-formed.
+A crashed agent that writes nothing will hard-fail the entire pipeline.
+
+### Status enum
+
+Every `kbe_output.json` MUST include a top-level `status` field with one
+of these values:
+
+| Value     | Meaning                                                            |
+|-----------|---------------------------------------------------------------------|
+| `success` | Extraction completed normally; full structured knowledge produced.  |
+| `partial` | Some sections extracted; others failed or were skipped.             |
+| `failed`  | Extraction could not produce useful structured knowledge.           |
+
+`skipped` is reserved for downstream consumers and is never emitted by KBE.
+
+### Known failure modes
+
+| `failure_mode`         | Trigger                                                               | Recommended status |
+|------------------------|------------------------------------------------------------------------|-------------------|
+| `pdf_not_found`        | `input/paper.pdf` is absent.                                          | `failed`          |
+| `pdf_unreadable`       | `pdf2text` returns `success: false` or empty text.                    | `failed`          |
+| `pdf_encrypted`        | `pdf2text` raises a password / encryption error.                      | `failed`          |
+| `text_too_short`       | Cleaned text < 1000 characters (likely a scan or wrong file).         | `failed`          |
+| `domain_unrecognized`  | No biostat/ML/NLP template matches; falls back to generic extraction. | `partial`         |
+| `template_partial`     | Some template sections extracted, others left empty.                  | `partial`         |
+| `parse_error`          | An internal extraction step crashed.                                  | `partial`         |
+
+### Required output on failure
+
+When `status != "success"`, `kbe_output.json` MUST conform to this shape:
+
+```json
+{
+  "paper_id": "<review_title from arguments>",
+  "paper_title": null,
+  "extraction_timestamp": "<ISO 8601 UTC>",
+  "status": "failed",
+  "failure_mode": "pdf_unreadable",
+  "failure_reason": "pdf2text returned success=false: 'EOF before %%EOF'",
+  "structured_knowledge": null,
+  "identified_assumptions": [],
+  "statistical_methods": [],
+  "data_generation_processes": [],
+  "reproducibility_gaps": [],
+  "partial_data": null,
+  "notes": "See notes.md for context."
+}
+```
+
+For `status: "partial"`, populate every field with whatever was successfully
+extracted, leave the rest as empty arrays / null, and set `partial_data` to
+a short object describing which template sections succeeded:
+
+```json
+"partial_data": {
+  "sections_extracted": ["abstract", "methods"],
+  "sections_failed": ["results", "discussion"]
+}
+```
+
+When `partial` includes a successfully parsed title section, `paper_title`
+MUST be populated with the extracted title string rather than left null.
+
+### Behavioral rules
+
+1. NEVER raise an unhandled exception. Catch internal errors, classify them
+   into a `failure_mode`, and write the failure output.
+2. The `paper_id` field MUST be set to the kebab-case `review_title` from
+   the workflow arguments, even when no PDF could be read. It is stable
+   across all outputs and survives upstream failure.
+3. The `paper_title` field is the full human-readable title parsed from
+   the manuscript PDF. KBE is the only agent that can populate it. When
+   the PDF cannot be read, set it to `null`. When the title section of
+   the PDF is successfully parsed, set it to the extracted string.
+   Downstream (Review) reads this field — it is the only path by which
+   the manuscript's title reaches `risk_matrix.json`.
+4. `notes.md` is always written. On failure, it must contain at minimum:
+   the failure mode, the failure reason, and any diagnostic output from
+   the failing tool (truncated to ~500 lines).
+5. Log every failure mode encountered to `ai4r/<review_title>/logs/workflow.log`
+   in addition to writing it into `kbe_output.json`.

@@ -148,6 +148,7 @@ All outputs saved to: `/ai4r/{review_title}/review/`
 - **Minor**: Does not block reproduction (style issues, missing but inferable info)
 - **Suggestions**: Best practices not followed
 
+---
 
 ## Principles
 
@@ -157,9 +158,141 @@ All outputs saved to: `/ai4r/{review_title}/review/`
 **Document thoroughly** — Another reviewer should understand exactly what you did.
 **Qualitative over exact** — For reduced runs, patterns and rankings matter more than exact numbers.
 
+---
+
 ## References
 
 - `references/full-audit-checklist.md` — Complete checklist for documentation, completeness, organization, quality, reproducibility, and advices to add to the items from the template
 - `assets/audit-report-template.md` — Detailed output template for the Exhaustive Audit Report document
 - `assets/review-template.md` — Template output for the Biometrical Journal essential Checklist document
 - `references/full-audit-checklist.md` — Template for the Final Review Summary document
+
+---
+
+## Failure Handling
+
+The Review agent has two distinct failure responsibilities:
+
+1. **Upstream failure** — KBE or CQV (or ER) emitted `status: "failed"` or
+   `status: "partial"`. Review must degrade gracefully and never invent
+   evidence to fill the gap.
+2. **Self failure** — Review itself cannot complete the audit. Even then,
+   Review MUST produce all four required files. A missing output file is
+   a hard pipeline failure.
+
+### Handling upstream failure (degraded inputs)
+
+Before doing any analysis, read each upstream JSON and inspect its `status`
+field. Apply these rules:
+
+| Upstream status                  | Action                                                                                                                                              |
+|----------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| KBE `failed`                     | Do not infer methodology, statistical methods, or assumptions. Mark every checklist item that depends on paper context as **Unverified**.            |
+| KBE `partial`                    | Use only `partial_data.sections_extracted`. Mark items that depend on missing sections as **Unverified**.                                            |
+| CQV `failed`                     | Do not pretend to have audited the code. Every code-quality, dependency, and reproducibility checklist item becomes **Unverified**.                  |
+| CQV `partial`                    | Use only `partial_data.checks_completed`. Items dependent on failed/skipped checks become **Unverified**.                                            |
+| ER `skipped` (default)           | No action; ER is expected to be skipped in v0. Do not penalize.                                                                                      |
+| ER `failed` (when enabled)       | Report execution failure as a finding. Do not infer results from CQV alone.                                                                          |
+
+"Unverified" items count as evidence gaps in the risk model. They MUST be
+listed explicitly in `checklist.md` with a brief reason (e.g. "Unverified —
+CQV failed: assets_directory_empty"). They MUST NOT be silently passed.
+
+When upstream degradation is the *primary* reason the audit cannot be
+completed, the agent's own status becomes `partial` (see below).
+
+### Self-status enum
+
+The risk matrix gets a new field `assessment_status` distinct from
+`verdict`. The split lets a successful audit reach `verdict: REJECT`
+without confusing it with an audit that couldn't run.
+
+| `assessment_status` | Meaning                                                                                       |
+|---------------------|------------------------------------------------------------------------------------------------|
+| `complete`          | All checklist items were either Pass, Fail, or Suggestion with concrete evidence.              |
+| `partial`           | One or more items marked Unverified due to upstream gaps; verdict still issued with caveat.    |
+| `failed`            | Review could not produce a meaningful verdict at all.                                          |
+
+### Verdict enum (extended)
+
+The original four values plus one sentinel for the failure case:
+
+`ACCEPT` | `MINOR REVISION` | `MAJOR REVISION` | `REJECT` | `UNABLE_TO_ASSESS`
+
+`UNABLE_TO_ASSESS` is only valid when `assessment_status` is `failed`.
+
+### Known self-failure modes
+
+| `failure_mode`              | Trigger                                                                  |
+|-----------------------------|---------------------------------------------------------------------------|
+| `all_upstream_failed`       | KBE and CQV both have `status: "failed"` and ER is skipped/failed.        |
+| `risk_matrix_schema_error`  | Agent built a risk matrix but failed internal schema validation.          |
+| `template_render_error`     | One of the markdown templates failed to render with available evidence.   |
+| `parse_error`               | Reading an upstream JSON raised an error.                                 |
+
+### Required outputs when assessment_status = "partial"
+
+All four files are written normally, but:
+
+- `final_review.md` opens with a one-paragraph "Limitations of this audit"
+  notice listing which upstream stages were degraded and what that means
+  for confidence in the verdict.
+- `checklist.md` marks each affected item as **Unverified** with the reason.
+- `exhaustive_audit_report.md` quotes the failure modes verbatim from
+  upstream JSONs in its "Inputs" section.
+- `risk_matrix.json` sets `assessment_status: "partial"`, lists the upstream
+  failures under a top-level `upstream_status` block, and may still issue a
+  conventional verdict.
+
+### Required outputs when assessment_status = "failed"
+
+All four files are still written. Concrete minimum content:
+
+`risk_matrix.json`:
+
+```json
+{
+  "paper_id": "<review_title>",
+  "paper_title": "<from kbe_output.json paper_title, or null>",
+  "assessed_at": "<ISO 8601 UTC>",
+  "assessment_status": "failed",
+  "failure_mode": "all_upstream_failed",
+  "failure_reason": "KBE: pdf_unreadable; CQV: assets_directory_empty",
+  "upstream_status": {
+    "kbe": {"status": "failed", "failure_mode": "pdf_unreadable"},
+    "cqv": {"status": "failed", "failure_mode": "assets_directory_empty"},
+    "er":  {"status": "skipped"}
+  },
+  "risk_score": null,
+  "risk_level": null,
+  "verdict": "UNABLE_TO_ASSESS",
+  "issues": {"critical": [], "major": [], "minor": [], "suggestions": []},
+  "required_changes": []
+}
+```
+
+`final_review.md`, `exhaustive_audit_report.md`, and `checklist.md` each
+contain a one-section explanation of why the audit could not be completed,
+quoting the upstream failure modes verbatim.
+
+### Behavioral rules
+
+1. NEVER raise an unhandled exception. Catch parse / template / schema
+   errors and write a `failed` review.
+2. Always read all upstream JSONs FIRST, before any analysis or report
+   generation. Decide `assessment_status` from upstream state and adjust
+   the workflow accordingly.
+3. Every Unverified checklist item MUST cite the upstream failure that
+   caused it. "Unverified" without attribution is a SKILL violation.
+4. The `paper_id` field MUST be set to the kebab-case `review_title` from
+   the workflow arguments, even when no paper or repo could be read. It is
+   stable across all outputs and survives upstream failure.
+5. The `paper_title` field MUST be copied from `kbe_output.json.paper_title`.
+   When that source value is `null` (KBE could not parse the title), Review
+   sets `paper_title` to `null` as well. Review MUST NOT infer or invent a
+   title from any other source.
+6. `risk_score` and `risk_level` are nullable ONLY when
+   `assessment_status: "failed"`. For `partial` they must still be computed
+   on the evidence that exists.
+7. Log every self-failure to `ai4r/<review_title>/logs/workflow.log` in
+   addition to writing it into the four output files.
