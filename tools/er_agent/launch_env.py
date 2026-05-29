@@ -1,7 +1,5 @@
 import subprocess
 from pathlib import Path
-from typing import List, Tuple
-
 
 SUPPORTED_ENGINES = {
     ("python", "3.11"): "python:3.11",
@@ -11,7 +9,7 @@ SUPPORTED_ENGINES = {
 def launch_env(
     engine: str,
     version: str,
-    dependencies: List[Tuple[str, str]],
+    dependencies: list[tuple[str, str]],
     dependency_path: str,
     code_path: str,
     data_path: str = ""

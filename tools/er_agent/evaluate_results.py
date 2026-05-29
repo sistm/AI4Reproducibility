@@ -4,16 +4,14 @@ ER Agent - Experiment Results Evaluation Module
 This module evaluates experimental results against reported claims and validates reproducibility.
 """
 
-from typing import Dict, List, Optional, Tuple
 import json
-import subprocess
 from pathlib import Path
 
 
 class ResultsEvaluator:
     """Evaluates experimental results for reproducibility and correctness."""
     
-    def __init__(self, results_path: str, paper_claims: Dict[str, any]):
+    def __init__(self, results_path: str, paper_claims: dict[str, any]):
         self.results_path = Path(results_path)
         self.paper_claims = paper_claims
         self.evaluation = {
@@ -25,7 +23,7 @@ class ResultsEvaluator:
             'warnings': []
         }
     
-    def verify_statistical_claims(self) -> List[Dict[str, any]]:
+    def verify_statistical_claims(self) -> list[dict[str, any]]:
         """Verify statistical claims reported in the paper."""
         results = []
         
@@ -34,7 +32,7 @@ class ResultsEvaluator:
             for table_file in (self.results_path / "tables").glob("*.csv"):
                 # Basic validation - check if file is readable
                 try:
-                    with open(table_file, 'r') as f:
+                    with open(table_file) as f:
                         lines = f.readlines()
                         if len(lines) > 1:  # Has header and data
                             results.append({
@@ -55,12 +53,12 @@ class ResultsEvaluator:
                         'claim_type': 'statistical_table',
                         'file': str(table_file),
                         'status': 'failed',
-                        'message': f'Error reading table: {str(e)}'
+                        'message': f'Error reading table: {e!s}'
                     })
         
         return results
     
-    def verify_reported_metrics(self) -> Dict[str, any]:
+    def verify_reported_metrics(self) -> dict[str, any]:
         """Check if reported metrics match experimental outputs."""
         metrics = {}
         
@@ -76,7 +74,7 @@ class ResultsEvaluator:
             file_path = self.results_path / filename
             if file_path.exists():
                 try:
-                    with open(file_path, 'r') as f:
+                    with open(file_path) as f:
                         data = json.load(f) if filename.endswith('.json') else f.read()
                         metrics[metric_name] = {
                             'status': 'found',
@@ -95,7 +93,7 @@ class ResultsEvaluator:
         
         return metrics
     
-    def check_experiment_logs(self) -> List[Dict[str, str]]:
+    def check_experiment_logs(self) -> list[dict[str, str]]:
         """Check experiment execution logs for errors or warnings."""
         logs = []
         
@@ -103,7 +101,7 @@ class ResultsEvaluator:
         
         for log_file in log_files:
             try:
-                with open(log_file, 'r') as f:
+                with open(log_file) as f:
                     content = f.read()
                     if 'ERROR' in content or 'Exception' in content:
                         logs.append({
@@ -121,7 +119,7 @@ class ResultsEvaluator:
                 logs.append({
                     'file': str(log_file),
                     'level': 'error',
-                    'message': f'Could not read log file: {str(e)}'
+                    'message': f'Could not read log file: {e!s}'
                 })
         
         return logs
@@ -140,7 +138,7 @@ class ResultsEvaluator:
         
         return round(score, 2)
     
-    def evaluate(self) -> Dict[str, any]:
+    def evaluate(self) -> dict[str, any]:
         """Run full evaluation of experimental results."""
         self.evaluation['claims_verified'] = self.verify_statistical_claims()
         self.evaluation['metrics'] = self.verify_reported_metrics()
@@ -167,7 +165,7 @@ class ResultsEvaluator:
         return self.evaluation
 
 
-def evaluate_results(results_path: str, paper_claims: Dict[str, any]) -> Dict[str, any]:
+def evaluate_results(results_path: str, paper_claims: dict[str, any]) -> dict[str, any]:
     """
     Main function to evaluate experimental results.
     

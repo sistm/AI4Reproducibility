@@ -4,7 +4,6 @@ CQV Agent - Get Dependencies Module
 This module extracts and validates dependency information from code repositories.
 """
 
-from typing import Dict, List, Optional
 import json
 from pathlib import Path
 
@@ -22,14 +21,14 @@ class DependencyExtractor:
             'renv': None
         }
     
-    def extract_python_dependencies(self) -> List[Dict[str, str]]:
+    def extract_python_dependencies(self) -> list[dict[str, str]]:
         """Extract Python dependencies from requirements.txt or pyproject.toml."""
         deps = []
         
         # Check for requirements.txt
         req_file = self.repo_path / "requirements.txt"
         if req_file.exists():
-            with open(req_file, 'r') as f:
+            with open(req_file) as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith('#'):
@@ -37,7 +36,7 @@ class DependencyExtractor:
         
         return deps
     
-    def extract_r_dependencies(self) -> List[Dict[str, str]]:
+    def extract_r_dependencies(self) -> list[dict[str, str]]:
         """Extract R dependencies from renv.lock or DESCRIPTION file."""
         deps = []
         
@@ -45,7 +44,7 @@ class DependencyExtractor:
         renv_file = self.repo_path / "renv.lock"
         if renv_file.exists():
             try:
-                with open(renv_file, 'r') as f:
+                with open(renv_file) as f:
                     renv_data = json.load(f)
                     if 'Packages' in renv_data:
                         for pkg_name, pkg_data in renv_data['Packages'].items():
@@ -58,23 +57,23 @@ class DependencyExtractor:
         
         return deps
     
-    def extract_docker_dependencies(self) -> Optional[str]:
+    def extract_docker_dependencies(self) -> str | None:
         """Check for Dockerfile and extract base image."""
         dockerfile = self.repo_path / "Dockerfile"
         if dockerfile.exists():
-            with open(dockerfile, 'r') as f:
+            with open(dockerfile) as f:
                 for line in f:
                     if line.startswith('FROM'):
                         return line.strip()
         return None
     
-    def extract_system_dependencies(self) -> List[str]:
+    def extract_system_dependencies(self) -> list[str]:
         """Extract system-level dependencies from apt.txt or system-requirements.txt."""
         deps = []
         
         apt_file = self.repo_path / "apt.txt"
         if apt_file.exists():
-            with open(apt_file, 'r') as f:
+            with open(apt_file) as f:
                 for line in f:
                     line = line.strip()
                     if line:
@@ -82,7 +81,7 @@ class DependencyExtractor:
         
         return deps
     
-    def extract_all(self) -> Dict[str, any]:
+    def extract_all(self) -> dict[str, any]:
         """Extract all dependencies from the repository."""
         self.dependencies['python'] = self.extract_python_dependencies()
         self.dependencies['r'] = self.extract_r_dependencies()
@@ -92,7 +91,7 @@ class DependencyExtractor:
         return self.dependencies
 
 
-def get_dependencies(repo_path: str) -> Dict[str, any]:
+def get_dependencies(repo_path: str) -> dict[str, any]:
     """
     Main function to extract dependencies from a repository.
     

@@ -6,6 +6,7 @@ This ensures code and data supplements are available for quality verification.
 """
 
 import os
+
 from tools.tools import run_tool
 
 
@@ -22,13 +23,13 @@ def auto_extract_zip(review_dir):
     assets_dir = os.path.join(review_dir, 'input', 'assets')
     
     if not os.path.exists(assets_dir):
-        print("ℹ️  No assets directory found, skipping extraction")
+        print("INFO: No assets directory found, skipping extraction")
         return []
     
     zip_files = [f for f in os.listdir(assets_dir) if f.endswith('.zip')]
     
     if not zip_files:
-        print("ℹ️  No .zip files found in assets directory")
+        print("INFO: No .zip files found in assets directory")
         return []
     
     print(f"📦 Found {len(zip_files)} .zip file(s) to extract")
@@ -46,7 +47,7 @@ def auto_extract_zip(review_dir):
             else:
                 print(f"⚠️  Failed to extract {zip_file}: {result.get('error', 'Unknown error')}")
         except Exception as e:
-            print(f"⚠️  Exception extracting {zip_file}: {str(e)}")
+            print(f"⚠️  Exception extracting {zip_file}: {e!s}")
     
     return extracted
 

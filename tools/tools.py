@@ -8,23 +8,22 @@ Importable from any working directory once the project is installed
 (`pip install -e .`) or when the repository root is on ``sys.path``.
 """
 
-from typing import Any, Callable, Dict
+from collections.abc import Callable
+from typing import Any
+
+from tools.cqv_agent.extract_zip import extract_zip
+from tools.cqv_agent.get_dependencies import get_dependencies
+from tools.cqv_agent.list_files import list_files
+from tools.cqv_agent.read_file import read_file
+from tools.er_agent.create_file import create_file
+from tools.er_agent.evaluate_results import evaluate_results
+from tools.er_agent.launch_env import launch_env
+from tools.kbe_agent.clean_pdf_text import clean_pdf_text as _clean_pdf_text_raw
 
 # Standard package-relative imports. These work because every subfolder of
 # ``tools/`` contains an empty ``__init__.py`` and the hyphenated module
 # filenames have been renamed to use underscores.
 from tools.kbe_agent.pdf2text import pdf2text as _pdf2text_raw
-from tools.kbe_agent.clean_pdf_text import clean_pdf_text as _clean_pdf_text_raw
-
-from tools.cqv_agent.extract_zip import extract_zip
-from tools.cqv_agent.list_files import list_files
-from tools.cqv_agent.read_file import read_file
-from tools.cqv_agent.get_dependencies import get_dependencies
-
-from tools.er_agent.create_file import create_file
-from tools.er_agent.launch_env import launch_env
-from tools.er_agent.evaluate_results import evaluate_results
-
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers
@@ -55,7 +54,7 @@ def clean_pdf_text(raw_text: str) -> str:
 # Tool registry
 # ---------------------------------------------------------------------------
 
-TOOLS: Dict[str, Dict[str, Any]] = {
+TOOLS: dict[str, dict[str, Any]] = {
     "extract_zip": {
         "function": extract_zip,
         "description": "Extract a zip archive in place.",
@@ -124,7 +123,7 @@ def get_tool(name: str) -> Callable[..., Any]:
     return TOOLS[name]["function"]
 
 
-def list_tools() -> Dict[str, Dict[str, Any]]:
+def list_tools() -> dict[str, dict[str, Any]]:
     """Return available tools with descriptions."""
     return {
         name: {"description": tool["description"], "args": tool["args"]}
