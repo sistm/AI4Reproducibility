@@ -4,6 +4,7 @@ Extract raw text from a PDF file using pdfminer.six library.
 """
 
 from pathlib import Path
+
 from pdfminer.high_level import extract_text
 
 
