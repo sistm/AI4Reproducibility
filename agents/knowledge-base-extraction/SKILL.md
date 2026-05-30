@@ -1,5 +1,7 @@
 # Knowledge Base Extraction (KBE) Agent
 
+see [LOGIC.md §3.1](../../LOGIC.md#31-kbe--knowledge-base-extraction) for this agent's place in the pipeline.
+
 ## Overview
 
 The KBE agent transforms unstructured scientific literature into structured, reproducible knowledge representations. It operates across all scientific domains but maintains domain-specific extraction templates.

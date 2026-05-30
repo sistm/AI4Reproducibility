@@ -6,6 +6,8 @@ description: |
 
 # Reproducibility Review
 
+see [LOGIC.md §3.3](../../LOGIC.md#34-review) for this agent's place in the pipeline.
+
 Review code and data supplements for computational reproducibility. Actively execute code, fix minor issues, run reduced simulations, and verify results match the paper.
 
 ## Workflow

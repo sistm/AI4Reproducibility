@@ -1,14 +1,13 @@
 # AI4reproducibility
-Authors : Jad El Karchi; <jad.el-karchi@u-bordeaux.fr> 
+
+Authors : Jad El Karchi; <jad.el-karchi@u-bordeaux.fr>
 
 ![Python](https://img.shields.io/badge/Python-3.12+-blue)
 ![Docker](https://img.shields.io/badge/Docker-29.2.1+-blue)
 
 > AI4Reproducibility is a framework for building agentic AI systems that automatically evaluate the reproducibility of scientific papers.
 
-
-
-## Problem 
+## Problem
 
 Scientific reproducibility is one of the most important pillars of research integrity. However, verifying reproducibility during the peer-review process is often:
 
@@ -17,8 +16,8 @@ Scientific reproducibility is one of the most important pillars of research inte
 - Inconsistent across reviewers
 - Difficult to standardize
 
+## Goal
 
-## Goal 
 The project aims mainly to create a pipeline of automated AI agents designed to evaluate the reproducibility of scientific paper submissions. This pipeline provides a detailed assessment of each major criterion involved in determining the research quality and reproducibility standards required for the acceptance of a submitted paper.
 
 ## Requirements
@@ -31,6 +30,7 @@ To run this project, ensure the following dependencies are installed:
 Docker is required to create isolated and reproducible execution environments for running experiment validation pipelines.
 
 ## Repository Structure
+
 ```bash
 ai4reproducibility/
 │
@@ -49,11 +49,13 @@ ai4reproducibility/
 └── assets/ # images/media content   
 ```
 
-# Method 
+*see [LOGIC.md](./LOGIC.md) for the architecture overview*
+
+# Method
 
 The system uses a multi-agent architecture where each agent specializes in evaluating specific aspects of the paper.
 
-- **Knowledge Extraction Agent (KBE)** : Understand the context, and extract domain expertise from different assets of the submission, **excluding experiments & code**. Gives a detailed and global understanding on where the paper really stands in research. 
+- **Knowledge Extraction Agent (KBE)** : Understand the context, and extract domain expertise from different assets of the submission, **excluding experiments & code**. Gives a detailed and global understanding on where the paper really stands in research.
 
 - **Code Quality Verification Agent (CQV)** : Code has an online repository exists, a clear README description, Code matches the described method, Dependencies are documented, Data accessibility, Licensing, versionning...
 
@@ -61,11 +63,11 @@ The system uses a multi-agent architecture where each agent specializes in evalu
 
 - **Review Agent** : Uses the outputs produced by the previous agents together with the criteria defined in the `CHECKLIST.md`. Through iterative reasoning and self-critique, the agent evaluates the gathered evidence and generates a comprehensive reproducibility assessment.
 
-This work is done using methods such as prompt alignment, tool creation, and system design to give access to paper reviewers to a reliable and deterministic valuation of the submitted paper. 
+This work is done using methods such as prompt alignment, tool creation, and system design to give access to paper reviewers to a reliable and deterministic valuation of the submitted paper.
 
 **N.B.**: The pipeline is designed to be **fail-safe**. Even if a paper is flagged or rejected by one agent, it is still passed to the subsequent agents for further analysis. This guarantees that a complete JSON analysis report is generated at the end of the pipeline.
 
-## AI : general rule 
+## AI : general rule
 
 Prompts must be carefully designed to ensure deterministic and reliable outputs from the language model. Since language models are inherently probabilistic models, they can sometimes produce hallucinations or misinformation. Therefore, this tool should be used with moderation and human supervision to ensure consistent, coherent, and trustworthy results across paper evaluations.
 

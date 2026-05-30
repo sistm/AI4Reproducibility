@@ -1,5 +1,7 @@
 # R Code Quality Verification Agent
 
+see [LOGIC.md §3.2](../../LOGIC.md#32-cqv--code-quality-verification) for this agent's place in the pipeline.
+
 ## Capabilities
 
 The R Code Quality Verification Agent performs comprehensive static and semantic analysis of R code to identify quality issues, statistical misuse, security vulnerabilities, and reproducibility risks.
