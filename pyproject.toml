@@ -55,6 +55,13 @@ dev = [
 er = [
     "docker>=7.0",
 ]
+# The Python orchestrator (LOGIC.md §7) calls models through LiteLLM, which
+# gives one provider-agnostic interface (Mistral, Anthropic, OpenAI, local
+# models, ...). Optional: needed only to *run* the pipeline, not to lint or
+# unit-test it — the agent loop is tested with an injected fake backend.
+orchestrator = [
+    "litellm>=1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/sistm/AI4Reproducibility"

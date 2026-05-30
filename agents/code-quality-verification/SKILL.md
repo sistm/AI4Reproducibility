@@ -242,3 +242,4 @@ to `null` or empty arrays. Use `partial_data` to record which checks ran:
    rather than silently passing them.
 6. Log every failure mode to `ai4r/<review_title>/logs/workflow.log` in
    addition to writing it into `cqv_output.json`.
+   
