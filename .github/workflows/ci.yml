@@ -36,6 +36,5 @@ jobs:
         run: |
           ruff check tools/
  
-      # No test suite yet — add tests under tests/ and uncomment the step below.
-      # - name: Test suite
-      #   run: pytest --tb=short
+      - name: Test suite
+        run: pytest --tb=short

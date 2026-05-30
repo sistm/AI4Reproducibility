@@ -15,6 +15,10 @@ from tools.cqv_agent.extract_zip import extract_zip
 from tools.cqv_agent.get_dependencies import get_dependencies
 from tools.cqv_agent.list_files import list_files
 from tools.cqv_agent.read_file import read_file
+from tools.cqv_agent.static_checks import (
+    list_static_checks,
+    run_static_check as _run_static_check_raw,
+)
 from tools.er_agent.create_file import create_file
 from tools.er_agent.evaluate_results import evaluate_results
 from tools.er_agent.launch_env import launch_env
@@ -113,6 +117,19 @@ TOOLS: dict[str, dict[str, Any]] = {
             "paper_claims": "Dictionary of claims reported in the paper",
         },
     },
+    "run_static_check": {
+        "function": run_static_check,
+        "description": "Run a single CQV static check against an extracted repository.",
+        "args": {
+            "tool_id":   "Name of the static check (see list_static_checks).",
+            "repo_path": "Path to the extracted repository.",
+        },
+    },
+    "list_static_checks": {
+        "function": list_static_checks,
+        "description": "List all CQV static checks and their implementation status.",
+        "args": {},
+    },
 }
 
 
@@ -134,3 +151,16 @@ def list_tools() -> dict[str, dict[str, Any]]:
 def run_tool(name: str, **kwargs: Any) -> Any:
     """Execute a tool by name with provided arguments."""
     return get_tool(name)(**kwargs)
+
+
+def run_static_check(tool_id: str, repo_path: str, **kwargs):
+    """Dispatch entry for any single static check.
+
+    Args:
+        tool_id:   e.g. "check_absolute_paths" — see list_static_checks()
+                   for the full registry.
+        repo_path: Path to the extracted repository.
+    Returns:
+        dict with keys: tool_id, status, summary, evidence, metadata.
+    """
+    return _run_static_check_raw(tool_id, repo_path, **kwargs)
