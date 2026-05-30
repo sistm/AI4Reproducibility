@@ -114,6 +114,59 @@ def cross_check(data: dict[str, Any]) -> list[str]:
     return errors
 
 
+def check_also_enforces(data: dict[str, Any], repro_yaml: Path = DEFAULT_YAML) -> list[str]:
+    """Referential integrity for the ``also_enforces:`` block.
+
+    The CQV checklist records reproducibility items it runs on behalf of the
+    reproducibility rubric under ``also_enforces:``. The JSON Schema validates
+    the *shape* of each entry but, being single-file, cannot confirm an id
+    actually resolves to an item in ``checklist.yaml``. This closes that gap:
+
+      - no id may be duplicated within the block;
+      - no id may also be a local item id (the convention is that
+        reproducibility items are *not* re-declared in the CQV YAML);
+      - every id must resolve to a real item in the reproducibility checklist.
+
+    Returns an empty list for any YAML that does not declare ``also_enforces``,
+    so it is a no-op for ``checklist.yaml`` itself.
+    """
+    block = data.get("also_enforces")
+    if not block:
+        return []
+
+    errors: list[str] = []
+
+    seen: set[str] = set()
+    for entry in block:
+        eid = entry["id"]
+        if eid in seen:
+            errors.append(f"also_enforces: duplicate id '{eid}'")
+        seen.add(eid)
+
+    local_ids = {item["id"] for item in data["items"]}
+    for eid in sorted(seen & local_ids):
+        errors.append(
+            f"also_enforces: '{eid}' is also a local item id — "
+            "reproducibility items must not be re-declared in the CQV YAML"
+        )
+
+    if not repro_yaml.exists():
+        errors.append(
+            f"also_enforces: cannot verify ids — reproducibility checklist "
+            f"not found at {repro_yaml}"
+        )
+        return errors
+
+    repro_ids = {item["id"] for item in load_yaml(repro_yaml)["items"]}
+    for eid in sorted(seen - repro_ids):
+        errors.append(
+            f"also_enforces: '{eid}' does not resolve to an item in "
+            f"{repro_yaml.name}"
+        )
+
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
@@ -278,7 +331,11 @@ def process_one(yaml_path: Path, *, do_validate: bool, do_render: bool, do_check
     schema = load_schema(schema_path)
 
     if do_validate:
-        errs = validate_against_schema(data, schema) + cross_check(data)
+        errs = (
+            validate_against_schema(data, schema)
+            + cross_check(data)
+            + check_also_enforces(data)
+        )
         if errs:
             print(f"VALIDATION FAILED — {yaml_path.name}", file=sys.stderr)
             for e in errs:
