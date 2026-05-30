@@ -7,9 +7,10 @@ patterns or files; they do not write to disk or call out to LLMs.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 # ---------------------------------------------------------------------------
 # Return type

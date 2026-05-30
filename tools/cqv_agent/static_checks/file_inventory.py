@@ -12,7 +12,6 @@ from pathlib import Path
 
 from ._common import CheckResult, iter_source_files, read_text_safe, relpath
 
-
 # ---------------------------------------------------------------------------
 # Documentation: README and sessionInfo
 # ---------------------------------------------------------------------------

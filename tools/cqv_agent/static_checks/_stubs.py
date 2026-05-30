@@ -29,66 +29,66 @@ def _stub(tool_id: str, reason: str) -> CheckResult:
 # Each of these typically needs a language parser (Python ast is easy;
 # R needs tree-sitter or shelling out to Rscript). Deferred to a later sprint.
 
-def check_set_seed_scope(repo_path: Path, **_: object) -> CheckResult:           # noqa: ARG001
+def check_set_seed_scope(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_set_seed_scope",
                  "Requires AST-level scope analysis (Python ast + R parser).")
 
 
-def check_parse_success(repo_path: Path, **_: object) -> CheckResult:            # noqa: ARG001
+def check_parse_success(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_parse_success",
                  "Requires language-specific parser invocation.")
 
 
-def check_undefined_references(repo_path: Path, **_: object) -> CheckResult:     # noqa: ARG001
+def check_undefined_references(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_undefined_references",
                  "Requires symbol-table construction per language.")
 
 
-def check_function_signatures(repo_path: Path, **_: object) -> CheckResult:      # noqa: ARG001
+def check_function_signatures(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_function_signatures",
                  "Requires per-package signature DB or live import.")
 
 
-def check_imports_complete(repo_path: Path, **_: object) -> CheckResult:         # noqa: ARG001
+def check_imports_complete(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_imports_complete",
                  "Requires resolving every used name against imports.")
 
 
-def check_duplicate_code_blocks(repo_path: Path, **_: object) -> CheckResult:    # noqa: ARG001
+def check_duplicate_code_blocks(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_duplicate_code_blocks",
                  "Requires token-level duplicate detection (e.g. CPD).")
 
 
-def check_dead_code(repo_path: Path, **_: object) -> CheckResult:                # noqa: ARG001
+def check_dead_code(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_dead_code",
                  "Requires control-flow graph construction.")
 
 
-def check_global_state_mutation(repo_path: Path, **_: object) -> CheckResult:    # noqa: ARG001
+def check_global_state_mutation(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_global_state_mutation",
                  "Requires AST scope tracking (Python global/nonlocal; R <<-).")
 
 
-def check_growing_vectors(repo_path: Path, **_: object) -> CheckResult:          # noqa: ARG001
+def check_growing_vectors(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_growing_vectors",
                  "Requires loop-body AST analysis.")
 
 
-def check_loop_invariants(repo_path: Path, **_: object) -> CheckResult:          # noqa: ARG001
+def check_loop_invariants(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_loop_invariants",
                  "Requires data-flow analysis.")
 
 
-def check_no_unbounded_loops(repo_path: Path, **_: object) -> CheckResult:       # noqa: ARG001
+def check_no_unbounded_loops(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_no_unbounded_loops",
                  "Requires CFG with loop termination analysis.")
 
 
-def check_error_handling_coverage(repo_path: Path, **_: object) -> CheckResult:  # noqa: ARG001
+def check_error_handling_coverage(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_error_handling_coverage",
                  "Requires AST + a registry of 'risky' operations.")
 
 
-def check_function_docs_present(repo_path: Path, **_: object) -> CheckResult:    # noqa: ARG001
+def check_function_docs_present(repo_path: Path, **_: object) -> CheckResult:
     return _stub("check_function_docs_present",
                  "Python AST is straightforward; R needs roxygen-block detection.")

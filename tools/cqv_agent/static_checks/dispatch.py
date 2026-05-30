@@ -13,10 +13,38 @@ Adding a new check:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ._common import CheckResult
+
+# Stubs
+from ._stubs import (
+    check_dead_code,
+    check_duplicate_code_blocks,
+    check_error_handling_coverage,
+    check_function_docs_present,
+    check_function_signatures,
+    check_global_state_mutation,
+    check_growing_vectors,
+    check_imports_complete,
+    check_loop_invariants,
+    check_no_unbounded_loops,
+    check_parse_success,
+    check_set_seed_scope,
+    check_undefined_references,
+)
+from .danger_patterns import (
+    check_no_arbitrary_downloads,
+    check_no_attach,
+    check_no_auto_install,
+    check_no_eval_parse,
+    check_no_hardcoded_secrets,
+    check_no_system_calls,
+    check_no_unsafe_deserialization,
+    check_no_workspace_clear,
+)
 
 # Implemented
 from .file_inventory import (
@@ -35,34 +63,6 @@ from .path_checks import (
     check_absolute_paths,
     check_path_helpers,
 )
-from .danger_patterns import (
-    check_no_arbitrary_downloads,
-    check_no_attach,
-    check_no_auto_install,
-    check_no_eval_parse,
-    check_no_hardcoded_secrets,
-    check_no_system_calls,
-    check_no_unsafe_deserialization,
-    check_no_workspace_clear,
-)
-
-# Stubs
-from ._stubs import (
-    check_dead_code,
-    check_duplicate_code_blocks,
-    check_error_handling_coverage,
-    check_function_docs_present,
-    check_function_signatures,
-    check_global_state_mutation,
-    check_growing_vectors,
-    check_imports_complete,
-    check_loop_invariants,
-    check_no_unbounded_loops,
-    check_parse_success,
-    check_set_seed_scope,
-    check_undefined_references,
-)
-
 
 CheckFn = Callable[..., CheckResult]
 
