@@ -332,8 +332,8 @@ def check_file_naming_hygiene(repo_path: Path, **_: object) -> CheckResult:
 # Archive layout (assumes archive is already extracted to repo_path)
 # ---------------------------------------------------------------------------
 
-CLUTTER_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
-CLUTTER_DIR_NAMES = {"__pycache__", ".ipynb_checkpoints", ".Rhistory"}
+CLUTTER_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini", ".Rhistory", ".RData", ".Rproj.user"}
+CLUTTER_DIR_NAMES = {"__pycache__", ".ipynb_checkpoints"}
 
 
 def check_archive_layout(repo_path: Path, **_: object) -> CheckResult:
