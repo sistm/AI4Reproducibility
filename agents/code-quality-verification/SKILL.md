@@ -8,6 +8,39 @@ The R Code Quality Verification Agent performs comprehensive static and semantic
 
 ---
 
+## Checklist scope
+
+CQV runs against **two** sets of items, both anchored in `cqv_checklist.yaml`:
+
+1. **Its own items** — every entry under `items:` in `cqv_checklist.yaml`
+   (the code-quality rubric).
+2. **Borrowed reproducibility items** — every entry under the
+   `also_enforces:` block at the top of `cqv_checklist.yaml`. These are
+   items defined in the reproducibility rubric (`checklist.yaml`) that CQV
+   runs *on behalf of* that rubric, because they are detectable by code
+   inspection (see [LOGIC.md §5](../../LOGIC.md#5-checklists-and-the-static-check-tool-layer)).
+
+For each `also_enforces` entry:
+
+- Resolve its `id` against `checklist.yaml` to read the item's full
+  description and `tool_id`. (The id is guaranteed to resolve — the
+  checklist validator enforces this — so a lookup miss is a pipeline bug,
+  not a submission issue.)
+- Run the corresponding check. The entry's `note` summarises what to look
+  for; most map to an existing static check or a file/pattern scan.
+- Record the finding in `cqv_output.json` keyed under the reproducibility
+  `id` verbatim (e.g. `bj-10-set-seed`), with file/line evidence, exactly
+  as for CQV's own items. Review attributes these to the reproducibility
+  rubric, so the id must be preserved unchanged.
+
+These items are run **in addition to** CQV's own items, never instead of
+them. If an `also_enforces` item cannot be evaluated — for example its
+static check is a `not_implemented` stub — record it with that status and
+the reason rather than omitting it, so Review marks it Unverified instead
+of silently passing it.
+
+---
+
 ## Static Code Analysis
 
 ### Lintr-Level Checks
