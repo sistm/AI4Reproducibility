@@ -109,6 +109,8 @@ ignore = ["E501"]  # let formatter handle line length
 minversion = "8.0"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+pythonpath = ["."]
+norecursedirs = ["tests/fixtures"]
 
 [tool.mypy]
 python_version = "3.12"
