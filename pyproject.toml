@@ -39,6 +39,7 @@ classifiers = [
 # Loose lower bounds are intentional; tighten if you hit incompatibilities.
 dependencies = [
     "pymupdf>=1.24",
+    "pdfminer.six>=20231228",
 ]
 
 [project.optional-dependencies]

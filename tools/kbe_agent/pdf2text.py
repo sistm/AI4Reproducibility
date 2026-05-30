@@ -5,8 +5,6 @@ Extract raw text from a PDF file using pdfminer.six library.
 
 from pathlib import Path
 
-from pdfminer.high_level import extract_text
-
 
 def pdf2text(pdf_path: str) -> dict:
     """
@@ -30,7 +28,10 @@ def pdf2text(pdf_path: str) -> dict:
                 "error": f"PDF file not found: {pdf_path}"
             }
         
-        # Use pdfminer.six to extract text
+        # Use pdfminer.six to extract text (imported lazily so the tool
+        # registry can be imported without the PDF dependency installed).
+        from pdfminer.high_level import extract_text
+
         text = extract_text(str(pdf_file))
         
         return {
