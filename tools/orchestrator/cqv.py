@@ -210,10 +210,10 @@ def run_cqv(
 
     try:
         text = run_agent(**agent_kwargs)
-    except Exception as exc:  # never let the stage crash the pipeline
+    except Exception as exc:  # transport / LLM call failure: no audit happened
         output = _failure_output(
-            review_title, "static_check_partial", f"agent run failed: {exc}",
-            status="partial",
+            review_title, "llm_request_failed", f"LLM request failed: {exc}",
+            status="failed",
         )
         _write_outputs(review_dir, output)
         return output
@@ -222,7 +222,7 @@ def run_cqv(
         parsed = _parse_model_json(text)
     except (ValueError, json.JSONDecodeError) as exc:
         output = _failure_output(
-            review_title, "static_check_partial",
+            review_title, "output_parse_failed",
             f"model output was not valid JSON: {exc}", status="partial",
         )
         output["notes"] = f"Raw model output (truncated):\n{text[:2000]}"

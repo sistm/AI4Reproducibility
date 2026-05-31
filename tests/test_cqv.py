@@ -113,7 +113,7 @@ def test_unparseable_output_is_partial_with_blocker(tmp_path):
     _seed_assets(tmp_path, "garbled")
     out = run_cqv("garbled", root=tmp_path, complete_fn=_fake_returning("not json"))
     assert out["status"] == "partial"
-    assert out["failure_mode"] == "static_check_partial"
+    assert out["failure_mode"] == "output_parse_failed"
     assert len(out["reproducibility_blockers"]) >= 1
     assert VALIDATOR_REQUIRED_KEYS <= set(_read_output(tmp_path, "garbled"))
 
@@ -124,14 +124,15 @@ def test_non_kebab_title_rejected(tmp_path):
     assert out["failure_mode"] == "bad_review_title"
 
 
-def test_backend_exception_caught(tmp_path):
+def test_backend_exception_is_failed_llm_request(tmp_path):
     _seed_assets(tmp_path, "boom")
 
     def exploding(model, messages, tools):
         raise RuntimeError("model exploded")
 
     out = run_cqv("boom", root=tmp_path, complete_fn=exploding)
-    assert out["status"] == "partial"
+    assert out["status"] == "failed"
+    assert out["failure_mode"] == "llm_request_failed"
     assert "model exploded" in out["failure_reason"]
 
 

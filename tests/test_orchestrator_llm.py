@@ -7,9 +7,12 @@ conditions CI runs under.
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
-from tools.orchestrator.config import STAGE_MODELS, model_for
+from tools.orchestrator.config import STAGE_MODELS, max_tokens, model_for, num_retries
 from tools.orchestrator.llm import AgentStepLimit, LLMResponse, ToolCall, run_agent
 
 
@@ -144,3 +147,41 @@ def test_model_for_unknown_stage_raises(monkeypatch):
     monkeypatch.delenv("AI4R_MODEL_NOPE", raising=False)
     with pytest.raises(KeyError):
         model_for("nope")
+
+
+# ---------------------------------------------------------------------------
+# Call parameters
+# ---------------------------------------------------------------------------
+
+def test_call_params_default_and_env_override(monkeypatch):
+    monkeypatch.delenv("AI4R_MAX_TOKENS", raising=False)
+    assert max_tokens() == 8192
+    monkeypatch.setenv("AI4R_MAX_TOKENS", "16000")
+    assert max_tokens() == 16000
+    monkeypatch.setenv("AI4R_MAX_TOKENS", "not-an-int")  # bad value falls back
+    assert max_tokens() == 8192
+
+
+def test_litellm_backend_passes_call_params(monkeypatch):
+    """The default backend must forward max_tokens/timeout/num_retries.
+
+    Injects a fake ``litellm`` module so this runs in CI without the real
+    dependency.
+    """
+    captured: dict = {}
+
+    msg = types.SimpleNamespace(content="hi", tool_calls=None)
+    resp = types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+    fake = types.ModuleType("litellm")
+    fake.completion = lambda **kw: (captured.update(kw), resp)[1]
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.delenv("AI4R_NUM_RETRIES", raising=False)
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    response = _litellm_complete("openai/x", [{"role": "user", "content": "hi"}], [])
+    assert response.text == "hi"
+    assert captured["max_tokens"] == max_tokens()
+    assert captured["num_retries"] == num_retries()
+    assert "timeout" in captured

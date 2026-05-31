@@ -60,7 +60,15 @@ def _litellm_complete(
     """
     import litellm  # lazy: only needed for real calls
 
-    kwargs: dict[str, Any] = {"model": model, "messages": messages}
+    from tools.orchestrator import config
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": config.max_tokens(),
+        "timeout": config.request_timeout(),
+        "num_retries": config.num_retries(),
+    }
     if tools:
         kwargs["tools"] = list(tools)
     response = litellm.completion(**kwargs)
