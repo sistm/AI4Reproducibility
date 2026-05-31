@@ -33,7 +33,6 @@ reads it as upstream context.
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -42,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.orchestrator.cqv import run_cqv
+from tools.orchestrator.er import run_er
 from tools.orchestrator.kbe import run_kbe
 from tools.orchestrator.llm import CompleteFn
 from tools.orchestrator.review import run_review
@@ -82,33 +82,6 @@ def _run_script(name: str, review_title: str, root: Path | str) -> tuple[int, st
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def _write_er_stub(review_dir: Path, review_title: str) -> dict[str, Any]:
-    """Write the reserved skipped ER stub (LOGIC.md §3.3) and log it.
-
-    ER never runs in v0; this stub satisfies ``validate_review.sh`` (which
-    requires ``er/er_output.json`` with a ``status`` key) and gives Review a
-    well-formed upstream input. ``skipped`` is the status enum value reserved
-    for exactly this (LOGIC.md §5; conventions §8).
-    """
-    er_dir = review_dir / "er"
-    er_dir.mkdir(parents=True, exist_ok=True)
-    stub: dict[str, Any] = {
-        "status": "skipped",
-        "paper_id": review_title,
-        "skipped_at": _now(),
-        "reason": "ER stage deferred in v0 (LOGIC.md §3.3): no code is executed.",
-    }
-    (er_dir / "er_output.json").write_text(
-        json.dumps(stub, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-
-    logs = review_dir / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    with (logs / "workflow.log").open("a", encoding="utf-8") as log:
-        log.write(f"{_now()} ER status=skipped (deferred, v0)\n")
-    return stub
-
-
 def _tail(text: str, n: int = 8) -> list[str]:
     """Last ``n`` non-empty lines of script output, for compact summaries."""
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -137,7 +110,6 @@ def run_pipeline(
     A failed pre-flight is the only hard stop: without the input layout / PDF
     there is nothing downstream to run.
     """
-    review_dir = Path(root) / "ai4r" / review_title
     summary: dict[str, Any] = {
         "review_title": review_title,
         "root": str(root),
@@ -167,7 +139,7 @@ def run_pipeline(
     steps["cqv"] = {"status": cqv.get("status"), "failure_mode": cqv.get("failure_mode")}
 
     # --- ER: deferred, write the skipped stub the gate + Review require -----
-    er = _write_er_stub(review_dir, review_title)
+    er = run_er(review_title, root=root)
     steps["er"] = {"status": er["status"]}
 
     # --- Review (synthesis; degrades on failed/partial upstream) ------------
