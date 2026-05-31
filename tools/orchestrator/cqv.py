@@ -38,6 +38,8 @@ from tools.orchestrator._stage import (
 )
 from tools.orchestrator.config import model_for
 from tools.orchestrator.llm import CompleteFn, run_agent
+from tools.orchestrator.stat_evidence import gather_stat_evidence
+from tools.orchestrator.stat_judges import run_stat_judges
 from tools.orchestrator.tool_specs import registry_specs
 
 # Tools CQV is allowed to call. Code inspection + static checks only; no
@@ -151,6 +153,78 @@ def _write_outputs(review_dir: Path, output: dict[str, Any]) -> None:
     )
 
 
+def _kbe_context(review_dir: Path) -> str:
+    """Build a compact paper-context string from kbe_output.json, if present.
+
+    Used by the two judges that cannot be decided from code alone
+    (representative-sampling, no-post-hoc): they need the paper's stated
+    population/plan. Returns "" if KBE has not run or is unreadable.
+    """
+    kbe_path = review_dir / "kbe" / "kbe_output.json"
+    try:
+        data = json.loads(kbe_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    fields = (
+        "paper_title",
+        "statistical_methods",
+        "data_generation_processes",
+        "structured_knowledge",
+        "identified_assumptions",
+    )
+    subset = {k: data[k] for k in fields if k in data}
+    if not subset:
+        return ""
+    return json.dumps(subset, ensure_ascii=False)[:6000]
+
+
+def _stat_blocker(verdict: dict[str, Any]) -> dict[str, Any]:
+    refs = verdict.get("evidence_refs") or []
+    return {
+        "id": f"STAT-{verdict['item_id']}",
+        "severity": str(verdict["severity"]).upper(),
+        "description": f"Statistical validity ({verdict['item_id']}): {verdict['rationale']}",
+        "evidence": "; ".join(str(r) for r in refs) or verdict["rationale"],
+    }
+
+
+def _apply_stat_layer(
+    output: dict[str, Any],
+    review_dir: Path,
+    assets_dir: Path,
+    *,
+    model: str | None,
+    complete_fn: CompleteFn | None,
+) -> None:
+    """Run the statistical-validity judges and fold results into ``output``.
+
+    Adds a ``statistical_validity`` list (one verdict per stat check) and
+    promotes any ``fail`` at critical/major severity into
+    ``reproducibility_blockers``. Never raises: any failure here leaves the
+    audit untouched and records a note, consistent with LOGIC.md §6.
+    """
+    try:
+        evidence = gather_stat_evidence(assets_dir)
+        verdicts = run_stat_judges(
+            evidence,
+            kbe_context=_kbe_context(review_dir) or None,
+            model=model,
+            complete_fn=complete_fn,
+        )
+    except Exception as exc:  # extraction/judging bug must not sink the audit
+        output["statistical_validity_error"] = f"stat layer skipped: {exc}"
+        return
+
+    output["statistical_validity"] = verdicts
+    promoted = [
+        _stat_blocker(v)
+        for v in verdicts
+        if v["verdict"] == "fail" and v["severity"] in ("critical", "major")
+    ]
+    if promoted:
+        output["reproducibility_blockers"] = output.get("reproducibility_blockers", []) + promoted
+
+
 def run_cqv(
     review_title: str,
     *,
@@ -217,6 +291,9 @@ def run_cqv(
         return output
 
     output = _normalise(parsed, review_title)
+    _apply_stat_layer(
+        output, review_dir, assets_dir, model=model, complete_fn=complete_fn
+    )
     _write_outputs(review_dir, output)
     return output
 
