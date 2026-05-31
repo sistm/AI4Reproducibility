@@ -1,112 +1,61 @@
 ---
 name: review
 description: |
-  Review code and data supplements of scientific papers for computational reproducibility. Use when asked to: review a code supplement, check if a paper's code is reproducible, audit a simulation study, evaluate a scientific paper's data and code, or assess computational reproducibility. Actively executes code (fixing minor issues), runs reduced simulations, and compares outputs against reported results. Outputs FOUR structured files: final_review.md, exhaustive_audit_report.md, checklist.md, and risk_matrix.json
+  Synthesise a reproducibility verdict for a scientific paper from the upstream KBE and CQV (and ER) outputs. Use when asked to: produce a review verdict, assemble the risk matrix, or judge computational reproducibility from already-extracted knowledge and code-audit results. Does NOT execute code, parse the PDF, or re-run static checks — it is judgment and synthesis over upstream JSON. Outputs FOUR structured files: final_review.md, exhaustive_audit_report.md, checklist.md, and risk_matrix.json
 ---
 
 # Reproducibility Review
 
-see [LOGIC.md §3.3](../../LOGIC.md#34-review) for this agent's place in the pipeline.
+see [LOGIC.md §3.4](../../LOGIC.md#34-review) for this agent's place in the pipeline.
 
-Review code and data supplements for computational reproducibility. Actively execute code, fix minor issues, run reduced simulations, and verify results match the paper.
+Synthesise a reproducibility verdict from the upstream KBE and CQV (and ER) outputs. Review does not execute code, parse the PDF, or re-run static checks — its job is judgment and synthesis (see LOGIC.md §3.4).
 
 ## Workflow
 
-### 1. Read the Paper
+### 1. Read the upstream outputs
 
-Start by reading the paper PDF (and supplement PDF if provided):
-- Understand what analyses/simulations were performed
-- Catalog all figures, tables, and numerical results to reproduce
-- Note computational methods, sample sizes, iterations, parameters
-- Understand the scientific claims being made
+Review never reads the manuscript PDF or the code itself — KBE and CQV (and,
+when enabled, ER) do that. Start by reading their JSON outputs:
 
-### 2. Examine Supplement Structure
+- `kbe/kbe_output.json` — extracted paper knowledge (title, assumptions,
+  statistical methods, data-generation processes, reproducibility gaps).
+- `cqv/cqv_output.json` — the code-quality audit (repository audit, dependency
+  validation, reproducibility blockers, execution readiness).
+- `er/er_output.json` — execution results, when ER is enabled (skipped in v0).
 
-Assess the code supplement:
-```
-- List all files and folder structure
-- Identify README and documentation
-- Locate main/master scripts vs. helper functions
-- Identify data files, code files, output files
-- Note programming languages used
-```
+### 2. Assess coverage and degradation
 
-### 3. Environment Setup
+Inspect each upstream `status` field BEFORE any synthesis (see Failure
+Handling). Decide `assessment_status` from the upstream state: `complete` when
+KBE and CQV both succeeded, `partial` when any upstream output is `partial` or
+`failed` (affected checklist items become Unverified), `failed` when no
+meaningful verdict can be produced. Synthesise only from what the upstream
+outputs contain — never re-derive paper or code facts, and never execute code
+or re-run static checks (that is ER's and CQV's job).
 
-Install dependencies flexibly:
-- Parse README for stated requirements
-- For R: install packages from `library()`/`require()` calls
-- For Python: install from `requirements.txt` or `import` statements
-- For Julia, MATLAB, Stata, etc.: follow documented setup
-- Document all packages installed and versions
-
-### 4. Execute Code with Fixes
-
-Run all code, fixing minor issues as needed:
-
-**Apply these fixes:**
-- Wrong file paths → adjust to actual structure
-- Missing imports → add required imports
-- Path case sensitivity → fix capitalization
-- Deprecated functions → update to current equivalents
-- Minor syntax errors → correct obvious typos
-- Working directory issues → set appropriately
-
-**Document every fix** — these become review items.
-
-### 5. Run Reduced Simulations
-
-For computationally intensive code, create reduced versions targeting < 1 hour runtime:
-
-**Reduction strategies:**
-- Monte Carlo replications: 1000 → 50-100
-- Sample sizes: reduce if studying asymptotics
-- Parameter grid: keep boundaries + middle, drop dense interior
-- CV folds: 10 → 3-5
-- Bootstrap iterations: reduce proportionally
-
-**Verify qualitative consistency:**
-- Do method rankings hold?
-- Are key patterns preserved?
-- Do conclusions remain supported?
-
-**For unavoidably long computations:**
-1. Write a setup script for the reduced run
-2. Create handoff document: what's done, what's running, what remains
-3. Ask user to run script and resume session with handoff
-4. Or: launch subagents to run different settings in parallel while continuing review
-
-### 6. Verify Results
-
-Compare generated outputs to paper:
-- Figures: visual/qualitative match
-- Tables: values match within rounding
-- Text results: numerical claims verified
-- Reduced runs: patterns consistent with full results
-
-### 7. Generate Exhaustive Audit Report
+### 3. Generate Exhaustive Audit Report
 
 Output **`exhaustive_audit_report.md`** using template in `assets/audit-report-template.md`
-- Comprehensive audit report with detailed execution logs
-- Environment setup documentation
-- Code execution results
-- Results verification findings
+- Comprehensive audit synthesising the KBE and CQV findings
+- Inputs section quoting each upstream `status` (and any `failure_mode`)
+- Code-quality findings as reported by CQV, cited by evidence path
+- Execution results from ER when enabled (omitted while ER is skipped)
 
-### 8. Generate Final Review Summary
+### 4. Generate Final Review Summary
 
 Output **`final_review.md`** using template in `references/full-audit-checklist.md`
 - Executive summary with overall assessment
 - Verdict (ACCEPT/MINOR REVISION/MAJOR REVISION/REJECT)
 - Key findings and recommendations
 
-### 9.  Generate Biometrical Journal Essential Checklist
+### 5. Generate Biometrical Journal Essential Checklist
 
 Output **`checklist.md`** using template in `assets/review-template.md`
 - Biometrical Journal essential reproducibility compliance checklist
 - All items checked or documented with explanations
 - list all Critical issues, Major issues, Minor issues, and Suggestions for Improvement
 
-### 10. Generate Risk Matrix
+### 6. Generate Risk Matrix
 
 Output **`risk_matrix.json`** with exactly this schema:
 
@@ -140,7 +89,7 @@ Field constraints:
   `final_review.md` narrative instead.
 - The `assessed_at` field is an ISO 8601 UTC timestamp.
 
-### 11. Output Location
+### 7. Output Location
 
 All outputs saved to: `/ai4r/{review_title}/review/`
 
@@ -154,11 +103,11 @@ All outputs saved to: `/ai4r/{review_title}/review/`
 
 ## Principles
 
-**Fix before complaining** — If fixable in 30 seconds, fix it and note as minor issue.
-**Verify, don't trust** — Run the code. Check outputs. Compare to paper.
+**Synthesise, don't re-derive** — Build the verdict from the KBE and CQV outputs; never read the paper or run code yourself.
+**Cite evidence** — Every issue points to a file path under `ai4r/<review_title>/`; findings without traceable evidence belong in the narrative, not the risk matrix.
+**Never invent** — When an upstream output is degraded, mark items Unverified rather than guessing.
 **Be constructive** — Goal is helping authors improve their supplement.
-**Document thoroughly** — Another reviewer should understand exactly what you did.
-**Qualitative over exact** — For reduced runs, patterns and rankings matter more than exact numbers.
+**Document thoroughly** — Another reviewer should understand exactly how the verdict was reached.
 
 ---
 
