@@ -49,11 +49,14 @@ REQUIRED=(
 )
 
 # Mandatory top-level keys per JSON output. Edit when the schema evolves.
-declare -A REQUIRED_KEYS=(
-    ["kbe/kbe_output.json"]="paper_id status"
-    ["cqv/cqv_output.json"]="paper_id status"
-    ["er/er_output.json"]="status"
-    ["review/risk_matrix.json"]="paper_id paper_title assessed_at assessment_status risk_score risk_level verdict issues required_changes upstream_status"
+# Format: "<relative_path>|<space-separated keys>"
+# Indexed array (not associative) for bash 3.2 compatibility: macOS still
+# ships bash 3.2 and `declare -A` was added in bash 4.0.
+REQUIRED_KEYS=(
+    "kbe/kbe_output.json|paper_id status"
+    "cqv/cqv_output.json|paper_id status"
+    "er/er_output.json|status"
+    "review/risk_matrix.json|paper_id paper_title assessed_at assessment_status risk_score risk_level verdict issues required_changes upstream_status"
 )
 
 # ---------------------------------------------------------------------------
@@ -99,8 +102,9 @@ fi
 # ---------------------------------------------------------------------------
 schema_errors=()
 
-for rel in "${!REQUIRED_KEYS[@]}"; do
-    keys="${REQUIRED_KEYS[$rel]}"
+for entry in "${REQUIRED_KEYS[@]}"; do
+    rel="${entry%|*}"
+    keys="${entry#*|}"
     path="${REVIEW_DIR}/${rel}"
 
     if ! python3 - "${path}" "${keys}" >> "${LOG}" 2>&1 <<'PY'
