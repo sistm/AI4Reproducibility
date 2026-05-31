@@ -275,6 +275,69 @@ calibration <- calibration(actual ~ predicted)
 plot(calibration)
 ```
 
+## Confidence Interval Construction
+
+The interval method must match the estimand and the sampling distribution. A
+normal-approximation interval is fine for a well-behaved mean at large n, but
+not for small samples, skewed/bounded statistics (proportions near 0/1,
+variances, ratios, medians), or estimands with no closed-form variance.
+
+```r
+# BAD: normal-approximation CI for a small-sample, skewed statistic
+m <- mean(x); se <- sd(x) / sqrt(length(x))
+ci <- c(m - 1.96 * se, m + 1.96 * se)   # n = 12, right-skewed -> poor coverage
+
+# GOOD: bootstrap CI (BCa) when the sampling distribution is unknown/skewed
+library(boot)
+b <- boot(x, function(d, i) mean(d[i]), R = 2000)
+boot.ci(b, type = "bca")
+
+# GOOD: profile-likelihood CI for model parameters rather than Wald
+confint(glm_model)            # profile CI in R's default for glm
+# (Wald: confint.default() — adequate only when the asymptotics hold)
+```
+
+```python
+# GOOD (Python): exact/score interval for a proportion, not normal approx
+from statsmodels.stats.proportion import proportion_confint
+proportion_confint(k, n, method="wilson")   # not method="normal" for small n
+# Bootstrap for arbitrary statistics
+from scipy.stats import bootstrap
+bootstrap((x,), np.mean, confidence_level=0.95, method="BCa")
+```
+
+Check that the chosen method (asymptotic `confint`/`.conf_int()`, bootstrap,
+profile, or simulation-based) is justifiable for the estimand and sample size;
+a Wald/normal interval on a small-sample or bounded statistic is the usual
+failure.
+
+## Pre-Specification and Post-Hoc Analysis
+
+Inference is only valid for analyses specified before seeing the outcome.
+Undocumented changes to hypotheses, model specification, or inclusion/exclusion
+criteria after seeing results (specification search, p-hacking) inflate Type I
+error. The check is a *comparison*: the paper's stated or pre-registered plan
+versus the pipeline that was actually run.
+
+```r
+# BAD: covariates / subsets chosen to move the p-value, not labelled exploratory
+model <- lm(y ~ treatment + age + bmi, data = df)        # plan said y ~ treatment
+df2 <- subset(df, site != "C")                            # exclusion not pre-specified
+# Reporting only the specification that "worked"
+
+# GOOD: executed analysis matches the registered plan; any deviation is
+# explicitly labelled exploratory/sensitivity, and all specifications reported
+model <- lm(y ~ treatment, data = df)                     # as pre-registered
+# Exploratory (clearly labelled):
+model_adj <- lm(y ~ treatment + age, data = df)
+```
+
+This cannot be judged from code alone — it needs the paper's analysis plan
+(from the knowledge-base extraction) to compare against the executed models,
+subsets, and filters. FAIL when the executed analysis diverges from the stated
+plan in ways that affect inference and is not labelled exploratory; mark
+unverified when no plan is available to compare against.
+
 ## Common Statistical Errors
 
 | Error | Detection | Fix |
@@ -290,7 +353,9 @@ plot(calibration)
 - [ ] Statistical test assumptions checked
 - [ ] Effect sizes reported alongside p-values
 - [ ] Multiple testing correction applied
+- [ ] Confidence intervals constructed by a method appropriate to the estimand
 - [ ] Cross-validation proper (no leakage)
 - [ ] Model diagnostics examined
+- [ ] Executed analysis matches the pre-specified plan (no undocumented post-hoc changes)
 - [ ] Results compared to sensitivity analyses
 - [ ] Limitations acknowledged
