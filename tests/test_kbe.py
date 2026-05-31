@@ -162,3 +162,43 @@ def test_log_and_notes_written(tmp_path):
     log = (tmp_path / "ai4r" / "logged" / "logs" / "workflow.log").read_text()
     assert "KBE status=success" in log
     assert (tmp_path / "ai4r" / "logged" / "kbe" / "notes.md").is_file()
+
+
+def test_default_extract_chains_string_returning_tools(monkeypatch):
+    """Regression: the registered pdf2text/clean_pdf_text return STRINGS (and
+    raise on failure), not dicts. _default_extract must chain them as such."""
+    import tools.tools as tools_mod
+    from tools.orchestrator.kbe import _default_extract
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_run_tool(name, **kwargs):
+        calls.append((name, kwargs))
+        if name == "pdf2text":
+            return "RAW from " + kwargs["pdf_path"]
+        if name == "clean_pdf_text":
+            return "CLEANED:" + kwargs["raw_text"]
+        raise AssertionError(f"unexpected tool {name}")
+
+    monkeypatch.setattr(tools_mod, "run_tool", fake_run_tool)
+    out = _default_extract(Path("/x/paper.pdf"))
+
+    assert out == "CLEANED:RAW from /x/paper.pdf"
+    assert [name for name, _ in calls] == ["pdf2text", "clean_pdf_text"]
+
+
+def test_default_extract_propagates_tool_failure(monkeypatch):
+    """A tool that raises (the wrappers' failure behaviour) must propagate."""
+    import tools.tools as tools_mod
+    from tools.orchestrator.kbe import _default_extract
+
+    def boom(name, **kwargs):
+        raise RuntimeError("pdf2text failed: encrypted")
+
+    monkeypatch.setattr(tools_mod, "run_tool", boom)
+    try:
+        _default_extract(Path("/x/paper.pdf"))
+    except RuntimeError as exc:
+        assert "encrypted" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError to propagate")

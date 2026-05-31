@@ -73,16 +73,17 @@ def _now() -> str:
 
 
 def _default_extract(pdf_path: Path) -> str:
-    """Extract and clean PDF text via the registry tools (lazy import)."""
+    """Extract and clean PDF text via the registry tools (lazy import).
+
+    The *registered* ``pdf2text`` and ``clean_pdf_text`` tools return the text
+    as a plain string and raise ``RuntimeError`` on failure (they wrap the
+    raw kbe_agent functions, which return dicts). So we chain them directly and
+    let any failure propagate to run_kbe's handler (-> ``pdf_unreadable``).
+    """
     from tools.tools import run_tool
 
-    raw = run_tool("pdf2text", pdf_path=str(pdf_path))
-    if not raw.get("success") or not raw.get("text"):
-        raise RuntimeError(f"pdf2text failed: {raw.get('error')}")
-    cleaned = run_tool("clean_pdf_text", raw_text=raw["text"])
-    if not cleaned.get("success"):
-        raise RuntimeError(f"clean_pdf_text failed: {cleaned.get('error')}")
-    return cleaned.get("cleaned_text", "")
+    raw_text = run_tool("pdf2text", pdf_path=str(pdf_path))
+    return run_tool("clean_pdf_text", raw_text=raw_text)
 
 
 def _section_prompt(field: str, guidance: str, paper_text: str) -> str:
