@@ -18,21 +18,24 @@ unparseable output become ``status != "success"`` outputs) and the orchestrator
 owns ``paper_id`` so ``validate_review.sh`` (requiring ``paper_id`` + ``status``)
 always passes.
 
-Note: this duplicates a few small helpers from :mod:`tools.orchestrator.kbe`
-(slug check, JSON-fence parsing, timestamp). That is deliberate for now —
-extracting a shared ``_stage`` helper is worth doing once Review makes it three
-users of the pattern (rule of three), rather than refactoring committed code here.
+Note: the slug check, JSON-fence parsing, timestamp and workflow-log append are
+shared with the other stages via :mod:`tools.orchestrator._stage`; only the
+CQV-specific output assembly lives here.
 """
 
 from __future__ import annotations
 
-import importlib.resources
 import json
-import re
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tools.orchestrator._stage import (
+    append_log,
+    is_kebab,
+    load_skill,
+    now_iso,
+    parse_json_object,
+)
 from tools.orchestrator.config import model_for
 from tools.orchestrator.llm import CompleteFn, run_agent
 from tools.orchestrator.tool_specs import registry_specs
@@ -49,14 +52,6 @@ CQV_TOOLS = [
 ]
 
 _ALLOWED_STATUS = {"success", "partial", "failed"}
-_KEBAB = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-
-
-def _skill_prompt() -> str:
-    resource = importlib.resources.files("agents").joinpath(
-        "code-quality-verification/SKILL.md"
-    )
-    return resource.read_text(encoding="utf-8")
 
 
 def _user_prompt(assets_dir: Path, review_title: str) -> str:
@@ -77,10 +72,6 @@ def _user_prompt(assets_dir: Path, review_title: str) -> str:
     )
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
 def _default_blocker(reason: str | None) -> dict[str, Any]:
     return {
         "id": "BLOCKER-0",
@@ -95,7 +86,7 @@ def _failure_output(
 ) -> dict[str, Any]:
     return {
         "paper_id": review_title,
-        "audit_timestamp": _now(),
+        "audit_timestamp": now_iso(),
         "status": status,
         "failure_mode": failure_mode,
         "failure_reason": failure_reason,
@@ -109,24 +100,13 @@ def _failure_output(
     }
 
 
-def _parse_model_json(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z0-9]*\n", "", stripped)
-        stripped = re.sub(r"\n```$", "", stripped.strip())
-    obj = json.loads(stripped)
-    if not isinstance(obj, dict):
-        raise ValueError("model returned JSON but not an object")
-    return obj
-
-
 def _normalise(obj: dict[str, Any], review_title: str) -> dict[str, Any]:
     obj["paper_id"] = review_title  # authoritative
     obj.pop("paper_title", None)  # rule 3: CQV must not emit paper_title
 
     status = obj.get("status")
     obj["status"] = status if status in _ALLOWED_STATUS else "success"
-    obj["audit_timestamp"] = obj.get("audit_timestamp") or _now()
+    obj["audit_timestamp"] = obj.get("audit_timestamp") or now_iso()
     obj.setdefault("repository_audit", None)
     obj.setdefault("code_method_alignment", None)
     obj.setdefault("dependency_validation", None)
@@ -165,11 +145,10 @@ def _write_outputs(review_dir: Path, output: dict[str, Any]) -> None:
         )
     (cqv_dir / "repo_analysis.md").write_text(str(analysis), encoding="utf-8")
 
-    logs_dir = review_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    with (logs_dir / "workflow.log").open("a", encoding="utf-8") as log:
-        log.write(f"{_now()} CQV status={output['status']} "
-                  f"mode={output.get('failure_mode', '-')}\n")
+    append_log(
+        review_dir,
+        f"CQV status={output['status']} mode={output.get('failure_mode', '-')}",
+    )
 
 
 def run_cqv(
@@ -189,7 +168,7 @@ def run_cqv(
     review_dir = Path(root) / "ai4r" / review_title
     assets_dir = review_dir / "input" / "assets"
 
-    if not _KEBAB.match(review_title):
+    if not is_kebab(review_title):
         output = _failure_output(
             review_title, "bad_review_title",
             f"review_title is not kebab-case: {review_title!r}",
@@ -206,7 +185,7 @@ def run_cqv(
         return output
 
     agent_kwargs: dict[str, Any] = {
-        "system": _skill_prompt(),
+        "system": load_skill("code-quality-verification/SKILL.md"),
         "user": _user_prompt(assets_dir, review_title),
         "model": model or model_for("cqv"),
         "tools": registry_specs(CQV_TOOLS),
@@ -226,7 +205,7 @@ def run_cqv(
         return output
 
     try:
-        parsed = _parse_model_json(text)
+        parsed = parse_json_object(text)
     except (ValueError, json.JSONDecodeError) as exc:
         output = _failure_output(
             review_title, "output_parse_failed",

@@ -22,14 +22,18 @@ partial extraction reports which categories succeeded vs failed in
 
 from __future__ import annotations
 
-import importlib.resources
 import json
-import re
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tools.orchestrator._stage import (
+    append_log,
+    is_kebab,
+    load_skill,
+    now_iso,
+    parse_json_object,
+)
 from tools.orchestrator.config import model_for
 from tools.orchestrator.llm import CompleteFn, run_agent
 
@@ -59,17 +63,6 @@ _SECTION_GUIDANCE: dict[str, str] = {
     "reproducibility_gaps": "concrete reproducibility gaps (missing seeds, "
     "unspecified versions, undefined preprocessing, unavailable data)",
 }
-
-
-def _skill_prompt() -> str:
-    resource = importlib.resources.files("agents").joinpath(
-        "knowledge-base-extraction/SKILL.md"
-    )
-    return resource.read_text(encoding="utf-8")
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _default_extract(pdf_path: Path) -> str:
@@ -102,22 +95,11 @@ def _section_prompt(field: str, guidance: str, paper_text: str) -> str:
     )
 
 
-def _parse_json(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z0-9]*\n", "", stripped)
-        stripped = re.sub(r"\n```$", "", stripped.strip())
-    obj = json.loads(stripped)
-    if not isinstance(obj, dict):
-        raise ValueError("model returned JSON but not an object")
-    return obj
-
-
 def _run_section(
     paper_text: str, field: str, guidance: str, model: str, complete_fn: CompleteFn | None
 ) -> str:
     kwargs: dict[str, Any] = {
-        "system": _skill_prompt(),
+        "system": load_skill("knowledge-base-extraction/SKILL.md"),
         "user": _section_prompt(field, guidance, paper_text),
         "model": model,
         "tools": (),
@@ -134,7 +116,7 @@ def _failure_output(
     return {
         "paper_id": review_title,
         "paper_title": None,
-        "extraction_timestamp": _now(),
+        "extraction_timestamp": now_iso(),
         "status": status,
         "failure_mode": failure_mode,
         "failure_reason": failure_reason,
@@ -158,7 +140,7 @@ def _assemble(
     output: dict[str, Any] = {
         "paper_id": review_title,
         "paper_title": title if isinstance(title, str) and title else None,
-        "extraction_timestamp": _now(),
+        "extraction_timestamp": now_iso(),
         "status": "success",
         "partial_data": None,
         "notes": "",
@@ -209,18 +191,10 @@ def _write_outputs(review_dir: Path, output: dict[str, Any]) -> None:
         )
     (kbe_dir / "notes.md").write_text(str(notes), encoding="utf-8")
 
-    logs_dir = review_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    with (logs_dir / "workflow.log").open("a", encoding="utf-8") as log:
-        log.write(
-            f"{_now()} KBE status={output['status']} "
-            f"mode={output.get('failure_mode', '-')}\n"
-        )
-
-
-_KEBAB = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-
-
+    append_log(
+        review_dir,
+        f"KBE status={output['status']} mode={output.get('failure_mode', '-')}",
+    )
 def run_kbe(
     review_title: str,
     *,
@@ -237,7 +211,7 @@ def run_kbe(
     review_dir = Path(root) / "ai4r" / review_title
     pdf_path = review_dir / "input" / "paper.pdf"
 
-    if not _KEBAB.match(review_title):
+    if not is_kebab(review_title):
         output = _failure_output(
             review_title, "bad_review_title",
             f"review_title is not kebab-case: {review_title!r}",
@@ -283,7 +257,7 @@ def run_kbe(
             transport_seen = True
             continue
         try:
-            parsed = _parse_json(raw)
+            parsed = parse_json_object(raw)
         except (ValueError, json.JSONDecodeError) as exc:
             failed[field] = f"invalid JSON: {exc}"
             continue

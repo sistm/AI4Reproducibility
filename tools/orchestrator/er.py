@@ -18,13 +18,10 @@ raises, the orchestrator owns ``paper_id``, writes the contract file plus a
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
+from tools.orchestrator._stage import append_log, now_iso
 
 
 def run_er(review_title: str, *, root: Path | str = ".") -> dict[str, Any]:
@@ -41,17 +38,14 @@ def run_er(review_title: str, *, root: Path | str = ".") -> dict[str, Any]:
     output: dict[str, Any] = {
         "status": "skipped",
         "paper_id": review_title,
-        "skipped_at": _now(),
+        "skipped_at": now_iso(),
         "reason": "ER stage deferred in v0 (LOGIC.md §3.3): no code is executed.",
     }
     (er_dir / "er_output.json").write_text(
         json.dumps(output, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    logs_dir = review_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    with (logs_dir / "workflow.log").open("a", encoding="utf-8") as log:
-        log.write(f"{_now()} ER status=skipped (deferred, v0)\n")
+    append_log(review_dir, "ER status=skipped (deferred, v0)")
     return output
 
 

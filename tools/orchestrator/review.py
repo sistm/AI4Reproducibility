@@ -19,28 +19,31 @@ Contract guarantees enforced here:
 Output is sectioned (one model call for the risk-matrix core, one per markdown
 report) so no single response overruns the output-token cap.
 
-NOTE: KBE, CQV and Review now share this stage pattern (load SKILL -> sectioned
+NOTE: KBE, CQV and Review share this stage pattern (load SKILL -> sectioned
 toolless calls -> parse -> assemble -> never raise -> orchestrator owns identity
--> write). With three users, extracting a shared ``_stage`` helper is now clearly
-worth a follow-up refactor (rule of three).
+-> write). The identical scaffolding (slug check, timestamp, JSON-fence parsing,
+SKILL load, workflow-log append) now lives in :mod:`tools.orchestrator._stage`.
 """
 
 from __future__ import annotations
 
-import importlib.resources
 import json
-import re
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tools.orchestrator._stage import (
+    append_log,
+    is_kebab,
+    load_skill,
+    now_iso,
+    parse_json_object,
+)
 from tools.orchestrator.config import model_for
 from tools.orchestrator.llm import CompleteFn, run_agent
 
 _VERDICTS = {"ACCEPT", "MINOR REVISION", "MAJOR REVISION", "REJECT"}
 _RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 _FAILED_STATUSES = {"failed", "missing", "unreadable", "unknown"}
-_KEBAB = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # The three markdown outputs and what each should contain.
 _MD_OUTPUTS: dict[str, str] = {
@@ -53,15 +56,6 @@ _MD_OUTPUTS: dict[str, str] = {
     "quoting each upstream status and failure_mode, then the CQV and KBE findings "
     "organised by severity, each cited by evidence path",
 }
-
-
-def _skill_prompt() -> str:
-    resource = importlib.resources.files("agents").joinpath("review/SKILL.md")
-    return resource.read_text(encoding="utf-8")
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _load_upstream(path: Path) -> tuple[dict[str, Any] | None, str]:
@@ -96,17 +90,6 @@ def _level_from_score(score: int) -> str:
 
 def _score_from_level(level: str) -> int:
     return {"LOW": 12, "MEDIUM": 38, "HIGH": 63, "CRITICAL": 88}.get(level, 50)
-
-
-def _parse_json(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z0-9]*\n", "", stripped)
-        stripped = re.sub(r"\n```$", "", stripped.strip())
-    obj = json.loads(stripped)
-    if not isinstance(obj, dict):
-        raise ValueError("model returned JSON but not an object")
-    return obj
 
 
 def _context_blob(kbe: Any, cqv: Any, er: Any) -> str:
@@ -148,7 +131,7 @@ def _md_prompt(guidance: str, context: str, assessment_status: str) -> str:
 
 def _run_call(user: str, model: str, complete_fn: CompleteFn | None) -> str:
     kwargs: dict[str, Any] = {
-        "system": _skill_prompt(),
+        "system": load_skill("review/SKILL.md"),
         "user": user,
         "model": model,
         "tools": (),
@@ -206,7 +189,7 @@ def _assemble(
     rm: dict[str, Any] = {
         "paper_id": review_title,
         "paper_title": paper_title,
-        "assessed_at": _now(),
+        "assessed_at": now_iso(),
         "assessment_status": assessment_status,
         "upstream_status": upstream_status,
     }
@@ -249,13 +232,11 @@ def _write_review(review_dir: Path, risk_matrix: dict[str, Any], md_files: dict[
         text = md_files.get(name) or f"# {name}\n"
         (rdir / name).write_text(text, encoding="utf-8")
 
-    logs = review_dir / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    with (logs / "workflow.log").open("a", encoding="utf-8") as log:
-        log.write(
-            f"{_now()} REVIEW assessment_status={risk_matrix['assessment_status']} "
-            f"verdict={risk_matrix['verdict']}\n"
-        )
+    append_log(
+        review_dir,
+        f"REVIEW assessment_status={risk_matrix['assessment_status']} "
+        f"verdict={risk_matrix['verdict']}",
+    )
 
 
 def run_review(
@@ -269,7 +250,7 @@ def run_review(
     review_dir = Path(root) / "ai4r" / review_title
     unknown = {"kbe": {"status": "unknown"}, "cqv": {"status": "unknown"}, "er": {"status": "skipped"}}
 
-    if not _KEBAB.match(review_title):
+    if not is_kebab(review_title):
         rm = _assemble(
             review_title, None, "failed", unknown, None,
             "parse_error", f"review_title is not kebab-case: {review_title!r}",
@@ -307,7 +288,7 @@ def run_review(
 
     try:
         core_raw = _run_call(_risk_prompt(context, assessment_status), model_name, complete_fn)
-        core = _normalise_core(_parse_json(core_raw))
+        core = _normalise_core(parse_json_object(core_raw))
     except Exception as exc:  # cannot produce a verdict -> failed, but still write 4 files
         rm = _assemble(
             review_title, paper_title, "failed", upstream_status, None,
