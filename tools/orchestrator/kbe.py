@@ -1,21 +1,23 @@
 """KBE stage runner: paper PDF -> structured ``kbe_output.json`` + ``notes.md``.
 
-This is the first pipeline stage wired to a real model. It loads the KBE
-SKILL as the system prompt, exposes only the PDF tools to the model, runs the
-agent loop (:func:`tools.orchestrator.llm.run_agent`), then writes the two
-output files the contract requires (see ``agents/knowledge-base-extraction/
-SKILL.md`` and LOGIC.md §3.1).
+Sectioned extraction. A full single-shot JSON extraction of a real manuscript
+overruns the model's output-token cap and gets truncated, so KBE instead:
 
-Two contract guarantees are enforced here rather than trusted to the model:
+1. extracts the PDF text *once*, deterministically (no model tool loop — the
+   "tools" were a fixed two-step sequence, so the orchestrator runs them
+   directly; this also removes any dependence on the gateway forwarding tool
+   calls); then
+2. makes one bounded model call per knowledge category, each returning a small
+   JSON object, and assembles them.
 
-* The stage NEVER raises. Any failure — missing PDF, model error, unparseable
-  output — is caught and written as a ``status != "success"`` output, so the
-  post-flight validator always finds well-formed files (degraded continuation,
-  LOGIC.md §6).
-* ``paper_id`` is always the kebab-case ``review_title``, and
-  ``extraction_timestamp`` / required arrays / ``status`` are always present,
-  whatever the model returned. That keeps ``kbe_output.json`` valid against
-  ``validate_review.sh`` (which requires top-level ``paper_id`` and ``status``).
+Each call's *output* stays well under the cap regardless of paper length; the
+paper text rides in the input, comfortably inside the context window.
+
+Contract guarantees enforced here (see ``agents/knowledge-base-extraction/
+SKILL.md`` and LOGIC.md §6): the stage never raises; the orchestrator owns
+``paper_id`` (always the kebab-case title) and ``extraction_timestamp``; and a
+partial extraction reports which categories succeeded vs failed in
+``partial_data`` rather than discarding everything.
 """
 
 from __future__ import annotations
@@ -23,61 +25,111 @@ from __future__ import annotations
 import importlib.resources
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from tools.orchestrator.config import model_for
 from tools.orchestrator.llm import CompleteFn, run_agent
-from tools.orchestrator.tool_specs import registry_specs
 
-# Tools KBE is allowed to call (LOGIC.md §3.1). Deliberately narrow.
-KBE_TOOLS = ["pdf2text", "clean_pdf_text"]
+# Minimum cleaned-text length below which we treat extraction as having failed.
+_MIN_TEXT_CHARS = 500
 
-# Array fields that must always be present in kbe_output.json.
+# Ordered: one model call per entry. paper_title yields a string; the rest yield
+# JSON arrays. Keys match the kbe_output.json field names.
+_TITLE_FIELD = "paper_title"
 _ARRAY_FIELDS = (
+    "structured_knowledge",
     "identified_assumptions",
     "statistical_methods",
     "data_generation_processes",
     "reproducibility_gaps",
 )
 
-_KEBAB = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_SECTION_GUIDANCE: dict[str, str] = {
+    "paper_title": "the manuscript's full title",
+    "structured_knowledge": "atomic knowledge blocks (methods, metrics, results, "
+    "datasets), each an object describing one item",
+    "identified_assumptions": "explicit and implicit modelling/statistical "
+    "assumptions, each with a short category and risk",
+    "statistical_methods": "statistical and algorithmic methods used or proposed",
+    "data_generation_processes": "data sources, sampling, measurement and "
+    "preprocessing steps",
+    "reproducibility_gaps": "concrete reproducibility gaps (missing seeds, "
+    "unspecified versions, undefined preprocessing, unavailable data)",
+}
 
 
 def _skill_prompt() -> str:
-    """Load the KBE SKILL as the system prompt (install-safe via resources)."""
     resource = importlib.resources.files("agents").joinpath(
         "knowledge-base-extraction/SKILL.md"
     )
     return resource.read_text(encoding="utf-8")
 
 
-def _user_prompt(pdf_path: Path, review_title: str) -> str:
-    """Instruction prompt for one extraction run."""
-    fields = ", ".join(
-        ["paper_title", "structured_knowledge", *_ARRAY_FIELDS, "partial_data", "notes"]
-    )
-    return (
-        f"The manuscript PDF for review '{review_title}' is at:\n  {pdf_path}\n\n"
-        "Read it using the pdf2text tool, then clean_pdf_text, and perform the "
-        "knowledge-base extraction described in your instructions.\n\n"
-        "Return ONLY a single JSON object as your final message — no prose, no "
-        "markdown fences. Include these fields: "
-        f"{fields}. Use null for paper_title if you cannot read the title, and "
-        "empty arrays where you found nothing. Do not include paper_id, status, "
-        "or extraction_timestamp; those are set by the orchestrator."
-    )
-
-
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _default_extract(pdf_path: Path) -> str:
+    """Extract and clean PDF text via the registry tools (lazy import)."""
+    from tools.tools import run_tool
+
+    raw = run_tool("pdf2text", pdf_path=str(pdf_path))
+    if not raw.get("success") or not raw.get("text"):
+        raise RuntimeError(f"pdf2text failed: {raw.get('error')}")
+    cleaned = run_tool("clean_pdf_text", raw_text=raw["text"])
+    if not cleaned.get("success"):
+        raise RuntimeError(f"clean_pdf_text failed: {cleaned.get('error')}")
+    return cleaned.get("cleaned_text", "")
+
+
+def _section_prompt(field: str, guidance: str, paper_text: str) -> str:
+    if field == _TITLE_FIELD:
+        shape = f'{{"{field}": "<string, or null if not found>"}}'
+        kind = "a JSON string"
+    else:
+        shape = f'{{"{field}": [ ... ]}}'
+        kind = "a JSON array (use [] if you find nothing)"
+    return (
+        "Manuscript text:\n\n"
+        f"{paper_text}\n\n"
+        f"From the manuscript above, extract {guidance}.\n"
+        f"Return ONLY a single JSON object of the form {shape} — no prose, no "
+        f"markdown fences. The value must be {kind}."
+    )
+
+
+def _parse_json(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z0-9]*\n", "", stripped)
+        stripped = re.sub(r"\n```$", "", stripped.strip())
+    obj = json.loads(stripped)
+    if not isinstance(obj, dict):
+        raise ValueError("model returned JSON but not an object")
+    return obj
+
+
+def _run_section(
+    paper_text: str, field: str, guidance: str, model: str, complete_fn: CompleteFn | None
+) -> str:
+    kwargs: dict[str, Any] = {
+        "system": _skill_prompt(),
+        "user": _section_prompt(field, guidance, paper_text),
+        "model": model,
+        "tools": (),
+        "max_steps": 1,
+    }
+    if complete_fn is not None:
+        kwargs["complete_fn"] = complete_fn
+    return run_agent(**kwargs)
 
 
 def _failure_output(
     review_title: str, failure_mode: str, failure_reason: str, status: str = "failed"
 ) -> dict[str, Any]:
-    """Build a contract-valid output for a non-success run."""
     return {
         "paper_id": review_title,
         "paper_title": None,
@@ -95,36 +147,43 @@ def _failure_output(
     }
 
 
-def _parse_model_json(text: str) -> dict[str, Any]:
-    """Parse the model's final message as JSON, tolerating ``` fences."""
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        # drop a leading ```json / ``` fence and the trailing ```
-        stripped = re.sub(r"^```[a-zA-Z0-9]*\n", "", stripped)
-        stripped = re.sub(r"\n```$", "", stripped.strip())
-    obj = json.loads(stripped)
-    if not isinstance(obj, dict):
-        raise ValueError("model returned JSON but not an object")
-    return obj
-
-
-def _normalise(obj: dict[str, Any], review_title: str) -> dict[str, Any]:
-    """Force the orchestrator-owned fields and fill any missing required keys."""
-    obj["paper_id"] = review_title  # authoritative, always the slug
-    obj.setdefault("status", "success")
-    obj["extraction_timestamp"] = obj.get("extraction_timestamp") or _now()
-    obj.setdefault("paper_title", None)
-    obj.setdefault("structured_knowledge", None)
-    obj.setdefault("partial_data", None)
-    obj.setdefault("notes", "")
+def _assemble(
+    review_title: str,
+    extracted: dict[str, Any],
+    failed: dict[str, str],
+    transport_seen: bool,
+) -> dict[str, Any]:
+    title = extracted.get(_TITLE_FIELD)
+    output: dict[str, Any] = {
+        "paper_id": review_title,
+        "paper_title": title if isinstance(title, str) and title else None,
+        "extraction_timestamp": _now(),
+        "status": "success",
+        "partial_data": None,
+        "notes": "",
+    }
     for field in _ARRAY_FIELDS:
-        value = obj.get(field)
-        obj[field] = value if isinstance(value, list) else []
-    return obj
+        value = extracted.get(field)
+        output[field] = value if isinstance(value, list) else []
+
+    if not extracted:
+        output["status"] = "failed"
+        output["failure_mode"] = "llm_request_failed" if transport_seen else "parse_error"
+        output["failure_reason"] = "; ".join(f"{k}: {v}" for k, v in failed.items())[:1000]
+        output["structured_knowledge"] = None
+    elif failed:
+        output["status"] = "partial"
+        output["failure_mode"] = "template_partial"
+        output["failure_reason"] = "; ".join(f"{k}: {v}" for k, v in failed.items())[:1000]
+        output["partial_data"] = {
+            "sections_extracted": sorted(extracted),
+            "sections_failed": sorted(failed),
+        }
+        output["notes"] = f"Categories not extracted: {', '.join(sorted(failed))}."
+    return output
 
 
 def _write_outputs(review_dir: Path, output: dict[str, Any]) -> None:
-    """Write kbe_output.json and notes.md, and log the status."""
     kbe_dir = review_dir / "kbe"
     kbe_dir.mkdir(parents=True, exist_ok=True)
     (kbe_dir / "kbe_output.json").write_text(
@@ -134,7 +193,7 @@ def _write_outputs(review_dir: Path, output: dict[str, Any]) -> None:
     notes = output.get("notes") or ""
     if output["status"] != "success":
         notes = (
-            f"# KBE failure\n\n"
+            f"# KBE {output['status']}\n\n"
             f"- mode: {output.get('failure_mode')}\n"
             f"- reason: {output.get('failure_reason')}\n\n{notes}"
         )
@@ -143,8 +202,13 @@ def _write_outputs(review_dir: Path, output: dict[str, Any]) -> None:
     logs_dir = review_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     with (logs_dir / "workflow.log").open("a", encoding="utf-8") as log:
-        log.write(f"{_now()} KBE status={output['status']} "
-                  f"mode={output.get('failure_mode', '-')}\n")
+        log.write(
+            f"{_now()} KBE status={output['status']} "
+            f"mode={output.get('failure_mode', '-')}\n"
+        )
+
+
+_KEBAB = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def run_kbe(
@@ -153,13 +217,12 @@ def run_kbe(
     root: Path | str = ".",
     model: str | None = None,
     complete_fn: CompleteFn | None = None,
-    max_steps: int = 12,
+    extract_fn: Callable[[Path], str] | None = None,
 ) -> dict[str, Any]:
     """Run the KBE stage for ``review_title`` and return the written output dict.
 
-    ``root`` is the directory containing ``ai4r/``. ``model`` defaults to the
-    KBE stage model from config; ``complete_fn`` defaults to the LiteLLM
-    backend and can be injected with a fake for testing.
+    ``extract_fn`` turns the PDF path into cleaned text; it defaults to the
+    registry PDF tools and can be injected with a fake for testing.
     """
     review_dir = Path(root) / "ai4r" / review_title
     pdf_path = review_dir / "input" / "paper.pdf"
@@ -179,37 +242,44 @@ def run_kbe(
         _write_outputs(review_dir, output)
         return output
 
-    agent_kwargs: dict[str, Any] = {
-        "system": _skill_prompt(),
-        "user": _user_prompt(pdf_path, review_title),
-        "model": model or model_for("kbe"),
-        "tools": registry_specs(KBE_TOOLS),
-        "max_steps": max_steps,
-    }
-    if complete_fn is not None:
-        agent_kwargs["complete_fn"] = complete_fn
-
+    extract = extract_fn or _default_extract
     try:
-        text = run_agent(**agent_kwargs)
-    except Exception as exc:  # never let the stage crash the pipeline
+        paper_text = extract(pdf_path)
+    except Exception as exc:
         output = _failure_output(
-            review_title, "parse_error", f"agent run failed: {exc}", status="partial"
+            review_title, "pdf_unreadable", f"could not extract text: {exc}"
         )
         _write_outputs(review_dir, output)
         return output
 
-    try:
-        parsed = _parse_model_json(text)
-    except (ValueError, json.JSONDecodeError) as exc:
+    if len(paper_text.strip()) < _MIN_TEXT_CHARS:
         output = _failure_output(
-            review_title, "parse_error",
-            f"model output was not valid JSON: {exc}", status="partial",
+            review_title, "text_too_short",
+            f"extracted text is only {len(paper_text.strip())} chars",
         )
-        output["notes"] = f"Raw model output (truncated):\n{text[:2000]}"
         _write_outputs(review_dir, output)
         return output
 
-    output = _normalise(parsed, review_title)
+    model_name = model or model_for("kbe")
+    extracted: dict[str, Any] = {}
+    failed: dict[str, str] = {}
+    transport_seen = False
+
+    for field, guidance in _SECTION_GUIDANCE.items():
+        try:
+            raw = _run_section(paper_text, field, guidance, model_name, complete_fn)
+        except Exception as exc:  # transport / LLM call failure for this section
+            failed[field] = f"llm request failed: {exc}"
+            transport_seen = True
+            continue
+        try:
+            parsed = _parse_json(raw)
+        except (ValueError, json.JSONDecodeError) as exc:
+            failed[field] = f"invalid JSON: {exc}"
+            continue
+        extracted[field] = parsed.get(field)
+
+    output = _assemble(review_title, extracted, failed, transport_seen)
     _write_outputs(review_dir, output)
     return output
 

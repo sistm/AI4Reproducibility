@@ -1,8 +1,8 @@
-"""Tests for the KBE stage runner (tools/orchestrator/kbe.py).
+"""Tests for the sectioned KBE stage runner (tools/orchestrator/kbe.py).
 
-Runs with an injected fake completion backend and a dummy PDF file, so it needs
-neither LiteLLM nor a real PDF parser nor network access — the CI conditions.
-The real SKILL file is read as the system prompt (it ships in the repo).
+Uses an injected ``extract_fn`` (so no real PDF / pdfminer needed) and a fake
+completion backend that answers per knowledge category by detecting which field
+the section prompt asks for. No LiteLLM, no network — the CI conditions.
 """
 
 from __future__ import annotations
@@ -10,125 +10,155 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.orchestrator.kbe import run_kbe
+from tools.orchestrator.kbe import _ARRAY_FIELDS, run_kbe
 from tools.orchestrator.llm import LLMResponse
 
-VALIDATOR_REQUIRED_KEYS = {"paper_id", "status"}  # from validate_review.sh
+VALIDATOR_REQUIRED_KEYS = {"paper_id", "status"}
+LONG_TEXT = "This is a manuscript about survival analysis. " * 60  # > 500 chars
 
 
-def _seed_pdf(root: Path, title: str) -> Path:
-    """Create the input/paper.pdf the stage expects to find."""
+def _seed_pdf(root: Path, title: str) -> None:
     pdf = root / "ai4r" / title / "input" / "paper.pdf"
     pdf.parent.mkdir(parents=True, exist_ok=True)
     pdf.write_bytes(b"%PDF-1.5 dummy")
-    return pdf
-
-
-def _fake_returning(text: str):
-    def backend(model, messages, tools):
-        return LLMResponse(text=text)
-
-    return backend
 
 
 def _read_output(root: Path, title: str) -> dict:
     return json.loads((root / "ai4r" / title / "kbe" / "kbe_output.json").read_text())
 
 
-def test_success_path_writes_valid_output(tmp_path):
-    _seed_pdf(tmp_path, "my-paper")
-    model_json = json.dumps(
-        {
-            "paper_title": "A Study of Things",
-            "structured_knowledge": {"blocks": []},
-            "identified_assumptions": ["normality"],
-            "statistical_methods": ["t-test"],
-            "data_generation_processes": [],
-            "reproducibility_gaps": ["no set.seed"],
-            "partial_data": None,
-            "notes": "looks fine",
-        }
-    )
-    out = run_kbe("my-paper", root=tmp_path, complete_fn=_fake_returning(model_json))
+def _section_backend(per_field: dict[str, str]):
+    """Fake backend: pick the response whose field appears in the section prompt."""
 
+    def backend(model, messages, tools):
+        user = messages[-1]["content"]
+        for field, payload in per_field.items():
+            if f'"{field}"' in user:
+                return LLMResponse(text=payload)
+        return LLMResponse(text="{}")
+
+    return backend
+
+
+def _all_valid() -> dict[str, str]:
+    per = {"paper_title": json.dumps({"paper_title": "A Study of Things"})}
+    for f in _ARRAY_FIELDS:
+        per[f] = json.dumps({f: [f"{f}-item"]})
+    return per
+
+
+def _run(tmp_path, title, per_field, **kw):
+    _seed_pdf(tmp_path, title)
+    kw.setdefault("extract_fn", lambda p: LONG_TEXT)
+    return run_kbe(title, root=tmp_path, complete_fn=_section_backend(per_field), **kw)
+
+
+def test_all_sections_succeed(tmp_path):
+    out = _run(tmp_path, "my-paper", _all_valid())
     assert out["status"] == "success"
     assert out["paper_id"] == "my-paper"
     assert out["paper_title"] == "A Study of Things"
-    assert out["extraction_timestamp"]  # populated by the orchestrator
-    # files exist and the JSON satisfies the validator's required keys
-    on_disk = _read_output(tmp_path, "my-paper")
-    assert VALIDATOR_REQUIRED_KEYS <= set(on_disk)
-    assert (tmp_path / "ai4r" / "my-paper" / "kbe" / "notes.md").read_text() == "looks fine"
+    assert out["partial_data"] is None
+    for f in _ARRAY_FIELDS:
+        assert out[f] == [f"{f}-item"]
+    assert VALIDATOR_REQUIRED_KEYS <= set(_read_output(tmp_path, "my-paper"))
 
 
-def test_paper_id_is_forced_to_review_title(tmp_path):
-    _seed_pdf(tmp_path, "real-id")
-    # model tries to set a different paper_id; orchestrator must override it
-    model_json = json.dumps({"paper_id": "WRONG", "notes": "x"})
-    out = run_kbe("real-id", root=tmp_path, complete_fn=_fake_returning(model_json))
+def test_one_bad_section_is_partial(tmp_path):
+    per = _all_valid()
+    per["statistical_methods"] = "this is not json"  # one category fails to parse
+    out = _run(tmp_path, "partialish", per)
+    assert out["status"] == "partial"
+    assert out["failure_mode"] == "template_partial"
+    assert out["partial_data"]["sections_failed"] == ["statistical_methods"]
+    assert "statistical_methods" not in out["partial_data"]["sections_extracted"]
+    # the other categories still came through
+    assert out["identified_assumptions"] == ["identified_assumptions-item"]
+    # the failed category defaults to an empty array, not missing
+    assert out["statistical_methods"] == []
+
+
+def test_all_sections_fail_to_parse_is_failed(tmp_path):
+    per = {f: "nope" for f in (*_ARRAY_FIELDS, "paper_title")}
+    out = _run(tmp_path, "garbled", per)
+    assert out["status"] == "failed"
+    assert out["failure_mode"] == "parse_error"
+    assert VALIDATOR_REQUIRED_KEYS <= set(_read_output(tmp_path, "garbled"))
+
+
+def test_transport_failure_on_all_sections_is_failed(tmp_path):
+    _seed_pdf(tmp_path, "boom")
+
+    def exploding(model, messages, tools):
+        raise RuntimeError("gateway down")
+
+    out = run_kbe("boom", root=tmp_path, complete_fn=exploding, extract_fn=lambda p: LONG_TEXT)
+    assert out["status"] == "failed"
+    assert out["failure_mode"] == "llm_request_failed"
+    assert "gateway down" in out["failure_reason"]
+
+
+def test_empty_section_is_not_a_failure(tmp_path):
+    # valid JSON but empty arrays / null title -> success with empty content
+    per = {"paper_title": json.dumps({"paper_title": None})}
+    for f in _ARRAY_FIELDS:
+        per[f] = json.dumps({f: []})
+    out = _run(tmp_path, "empty-ok", per)
+    assert out["status"] == "success"
+    assert out["paper_title"] is None
+    assert all(out[f] == [] for f in _ARRAY_FIELDS)
+
+
+def test_fences_tolerated(tmp_path):
+    per = {f: "```json\n" + json.dumps({f: []}) + "\n```" for f in _ARRAY_FIELDS}
+    per["paper_title"] = "```json\n" + json.dumps({"paper_title": "T"}) + "\n```"
+    out = _run(tmp_path, "fenced", per)
+    assert out["status"] == "success"
+    assert out["paper_title"] == "T"
+
+
+def test_paper_id_always_the_title_regardless_of_model(tmp_path):
+    per = _all_valid()
+    per["paper_title"] = json.dumps({"paper_title": "X", "paper_id": "WRONG"})
+    out = _run(tmp_path, "real-id", per)
     assert out["paper_id"] == "real-id"
 
 
-def test_missing_fields_are_defaulted(tmp_path):
-    _seed_pdf(tmp_path, "sparse")
-    out = run_kbe("sparse", root=tmp_path, complete_fn=_fake_returning("{}"))
-    assert out["status"] == "success"
-    for field in (
-        "identified_assumptions",
-        "statistical_methods",
-        "data_generation_processes",
-        "reproducibility_gaps",
-    ):
-        assert out[field] == []
-    assert out["paper_title"] is None
-
-
-def test_json_fences_are_tolerated(tmp_path):
-    _seed_pdf(tmp_path, "fenced")
-    fenced = "```json\n" + json.dumps({"notes": "ok"}) + "\n```"
-    out = run_kbe("fenced", root=tmp_path, complete_fn=_fake_returning(fenced))
-    assert out["status"] == "success"
-
-
-def test_missing_pdf_is_a_failure_not_a_crash(tmp_path):
-    # no _seed_pdf -> no input/paper.pdf
+def test_pdf_not_found_is_failure(tmp_path):
     (tmp_path / "ai4r" / "no-pdf").mkdir(parents=True)
-    out = run_kbe("no-pdf", root=tmp_path, complete_fn=_fake_returning("{}"))
+    out = run_kbe("no-pdf", root=tmp_path, complete_fn=_section_backend({}),
+                  extract_fn=lambda p: LONG_TEXT)
     assert out["status"] == "failed"
     assert out["failure_mode"] == "pdf_not_found"
-    # output files still written
-    assert _read_output(tmp_path, "no-pdf")["status"] == "failed"
-    assert (tmp_path / "ai4r" / "no-pdf" / "kbe" / "notes.md").is_file()
 
 
-def test_unparseable_model_output_is_partial_not_crash(tmp_path):
-    _seed_pdf(tmp_path, "garbled")
-    out = run_kbe("garbled", root=tmp_path, complete_fn=_fake_returning("not json at all"))
-    assert out["status"] == "partial"
-    assert out["failure_mode"] == "parse_error"
-    on_disk = _read_output(tmp_path, "garbled")
-    assert VALIDATOR_REQUIRED_KEYS <= set(on_disk)
+def test_unreadable_pdf_is_failure(tmp_path):
+    _seed_pdf(tmp_path, "bad-pdf")
+
+    def boom_extract(p):
+        raise RuntimeError("pdfminer choked")
+
+    out = run_kbe("bad-pdf", root=tmp_path, complete_fn=_section_backend({}),
+                  extract_fn=boom_extract)
+    assert out["status"] == "failed"
+    assert out["failure_mode"] == "pdf_unreadable"
 
 
-def test_non_kebab_title_is_rejected(tmp_path):
-    out = run_kbe("Not Kebab", root=tmp_path, complete_fn=_fake_returning("{}"))
+def test_text_too_short_is_failure(tmp_path):
+    out = _run(tmp_path, "tiny", _all_valid(), extract_fn=lambda p: "too short")
+    assert out["status"] == "failed"
+    assert out["failure_mode"] == "text_too_short"
+
+
+def test_non_kebab_title_rejected(tmp_path):
+    out = run_kbe("Not Kebab", root=tmp_path, complete_fn=_section_backend({}),
+                  extract_fn=lambda p: LONG_TEXT)
     assert out["status"] == "failed"
     assert out["failure_mode"] == "bad_review_title"
 
 
-def test_backend_exception_is_caught(tmp_path):
-    _seed_pdf(tmp_path, "boom")
-
-    def exploding(model, messages, tools):
-        raise RuntimeError("model exploded")
-
-    out = run_kbe("boom", root=tmp_path, complete_fn=exploding)
-    assert out["status"] == "partial"
-    assert "model exploded" in out["failure_reason"]
-
-
-def test_log_line_is_appended(tmp_path):
-    _seed_pdf(tmp_path, "logged")
-    run_kbe("logged", root=tmp_path, complete_fn=_fake_returning("{}"))
+def test_log_and_notes_written(tmp_path):
+    _run(tmp_path, "logged", _all_valid())
     log = (tmp_path / "ai4r" / "logged" / "logs" / "workflow.log").read_text()
     assert "KBE status=success" in log
+    assert (tmp_path / "ai4r" / "logged" / "kbe" / "notes.md").is_file()
