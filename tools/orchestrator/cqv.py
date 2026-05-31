@@ -156,6 +156,13 @@ def _write_outputs(review_dir: Path, output: dict[str, Any]) -> None:
             f"- mode: {output.get('failure_mode')}\n"
             f"- reason: {output.get('failure_reason')}\n\n{analysis}"
         )
+    elif not analysis.strip():
+        # repo_analysis.md is a contract output and validate_review.sh rejects
+        # a <2-byte file; a success with no model notes still needs a body.
+        analysis = (
+            f"# CQV repo analysis — {output['paper_id']}\n\n"
+            "status: success. See cqv_output.json for the structured audit.\n"
+        )
     (cqv_dir / "repo_analysis.md").write_text(str(analysis), encoding="utf-8")
 
     logs_dir = review_dir / "logs"

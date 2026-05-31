@@ -198,6 +198,15 @@ def _write_outputs(review_dir: Path, output: dict[str, Any]) -> None:
             f"- mode: {output.get('failure_mode')}\n"
             f"- reason: {output.get('failure_reason')}\n\n{notes}"
         )
+    elif not notes.strip():
+        # The success path carries no free-form notes, but notes.md is a
+        # contract output and validate_review.sh rejects a <2-byte file, so
+        # write a minimal non-empty summary pointing at the structured output.
+        notes = (
+            f"# KBE notes — {output['paper_id']}\n\n"
+            "status: success. No free-form notes; the structured fields are in "
+            "kbe_output.json.\n"
+        )
     (kbe_dir / "notes.md").write_text(str(notes), encoding="utf-8")
 
     logs_dir = review_dir / "logs"
