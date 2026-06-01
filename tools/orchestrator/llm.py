@@ -14,6 +14,7 @@ orchestrator portable across providers (and off LiteLLM entirely, if needed).
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -67,11 +68,24 @@ def _litellm_complete(
         "messages": messages,
         "max_tokens": config.max_tokens(),
         "timeout": config.request_timeout(),
-        "num_retries": config.num_retries(),
     }
     if tools:
         kwargs["tools"] = list(tools)
-    response = litellm.completion(**kwargs)
+
+    # Retry in-process rather than delegating to LiteLLM's ``num_retries``: that
+    # path imports ``tenacity``, a transitive dependency that — when absent —
+    # crashes the call outright ("No module named 'tenacity'"), silently killing
+    # a section. A small self-contained loop keeps retries working with no extra
+    # dependency. (Coarse: retries any error; refine to transient-only if needed.)
+    retries = config.num_retries()
+    for attempt in range(retries + 1):
+        try:
+            response = litellm.completion(**kwargs)
+            break
+        except Exception:
+            if attempt >= retries:
+                raise
+            time.sleep(min(2 ** attempt, 8))
     message = response.choices[0].message
 
     calls: list[ToolCall] = []

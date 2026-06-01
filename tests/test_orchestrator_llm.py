@@ -8,6 +8,7 @@ conditions CI runs under.
 from __future__ import annotations
 
 import sys
+import time
 import types
 
 import pytest
@@ -163,7 +164,8 @@ def test_call_params_default_and_env_override(monkeypatch):
 
 
 def test_litellm_backend_passes_call_params(monkeypatch):
-    """The default backend must forward max_tokens/timeout/num_retries.
+    """The default backend forwards max_tokens/timeout and does NOT hand
+    num_retries to LiteLLM (retries are in-process, avoiding the tenacity dep).
 
     Injects a fake ``litellm`` module so this runs in CI without the real
     dependency.
@@ -183,5 +185,48 @@ def test_litellm_backend_passes_call_params(monkeypatch):
     response = _litellm_complete("openai/x", [{"role": "user", "content": "hi"}], [])
     assert response.text == "hi"
     assert captured["max_tokens"] == max_tokens()
-    assert captured["num_retries"] == num_retries()
+    assert "num_retries" not in captured  # retries handled in-process, not by litellm
     assert "timeout" in captured
+
+
+def test_litellm_backend_retries_in_process_without_tenacity(monkeypatch):
+    """Retries are our own loop; a transient error is retried, no tenacity needed."""
+    calls = {"n": 0}
+    msg = types.SimpleNamespace(content="ok", tool_calls=None)
+    resp = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=msg, finish_reason="stop")]
+    )
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise RuntimeError("transient blip")
+        return resp
+
+    fake = types.ModuleType("litellm")
+    fake.completion = flaky
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.setenv("AI4R_NUM_RETRIES", str(max(1, num_retries())))
+    monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    out = _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+    assert out.text == "ok"
+    assert calls["n"] == 2  # failed once, retried, succeeded
+
+
+def test_litellm_backend_raises_after_exhausting_retries(monkeypatch):
+    def always_fail(**kw):
+        raise RuntimeError("down")
+
+    fake = types.ModuleType("litellm")
+    fake.completion = always_fail
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "1")
+    monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with pytest.raises(RuntimeError):
+        _litellm_complete("m", [{"role": "user", "content": "x"}], [])
