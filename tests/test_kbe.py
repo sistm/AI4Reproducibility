@@ -226,3 +226,22 @@ def test_truncated_section_salvages_prefix_and_marks_partial(tmp_path):
     assert out["structured_knowledge"] == [{"k": "one"}, {"k": "two"}]
     assert "output_truncated" in out["failure_reason"]
     assert "structured_knowledge" in out["partial_data"]["sections_failed"]
+
+
+def test_overlong_section_capped_to_max_items(tmp_path):
+    from tools.orchestrator.kbe import _MAX_ITEMS
+
+    per = _all_valid()
+    per["structured_knowledge"] = json.dumps(
+        {"structured_knowledge": [f"item-{i}" for i in range(_MAX_ITEMS + 25)]}
+    )
+    out = _run(tmp_path, "capped", per)
+    assert out["status"] == "success"
+    assert len(out["structured_knowledge"]) == _MAX_ITEMS
+
+
+def test_section_prompt_states_the_item_cap():
+    from tools.orchestrator.kbe import _MAX_ITEMS, _section_prompt
+
+    assert f"at most {_MAX_ITEMS}" in _section_prompt("statistical_methods", "m", "PAPER")
+    assert "at most" not in _section_prompt("paper_title", "t", "PAPER")

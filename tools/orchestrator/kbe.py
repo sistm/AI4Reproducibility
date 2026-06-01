@@ -39,6 +39,10 @@ from tools.orchestrator.llm import CompleteFn, OutputTruncated, run_agent
 
 # Minimum cleaned-text length below which we treat extraction as having failed.
 _MIN_TEXT_CHARS = 500
+# Cap items per extracted array field: keeps each section's JSON well inside the
+# output-token cap (so it does not truncate) and gives downstream agents a tight,
+# prioritised knowledge base rather than an exhaustive dump.
+_MAX_ITEMS = 12
 
 # Ordered: one model call per entry. paper_title yields a string; the rest yield
 # JSON arrays. Keys match the kbe_output.json field names.
@@ -83,15 +87,21 @@ def _section_prompt(field: str, guidance: str, paper_text: str) -> str:
     if field == _TITLE_FIELD:
         shape = f'{{"{field}": "<string, or null if not found>"}}'
         kind = "a JSON string"
+        limit = ""
     else:
         shape = f'{{"{field}": [ ... ]}}'
         kind = "a JSON array (use [] if you find nothing)"
+        limit = (
+            f" Include at most {_MAX_ITEMS} items — the most important and most "
+            "reproducibility-relevant — and keep each to a single concise sentence "
+            "(roughly 200 characters or fewer), not a long paragraph."
+        )
     return (
         "Manuscript text:\n\n"
         f"{paper_text}\n\n"
         f"From the manuscript above, extract {guidance}.\n"
         f"Return ONLY a single JSON object of the form {shape} — no prose, no "
-        f"markdown fences. The value must be {kind}."
+        f"markdown fences. The value must be {kind}.{limit}"
     )
 
 
@@ -174,7 +184,9 @@ def _assemble(
     }
     for field in _ARRAY_FIELDS:
         value = extracted.get(field)
-        output[field] = value if isinstance(value, list) else []
+        # Enforce the cap even if the model over-produces, so downstream input
+        # (and this file) stay bounded regardless of the model's compliance.
+        output[field] = value[:_MAX_ITEMS] if isinstance(value, list) else []
 
     if not extracted:
         output["status"] = "failed"
