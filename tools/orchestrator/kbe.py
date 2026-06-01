@@ -35,7 +35,7 @@ from tools.orchestrator._stage import (
     parse_json_object,
 )
 from tools.orchestrator.config import model_for
-from tools.orchestrator.llm import CompleteFn, run_agent
+from tools.orchestrator.llm import CompleteFn, OutputTruncated, run_agent
 
 # Minimum cleaned-text length below which we treat extraction as having failed.
 _MIN_TEXT_CHARS = 500
@@ -93,6 +93,33 @@ def _section_prompt(field: str, guidance: str, paper_text: str) -> str:
         f"Return ONLY a single JSON object of the form {shape} — no prose, no "
         f"markdown fences. The value must be {kind}."
     )
+
+
+def _salvage_array(raw: str, field: str) -> list[Any]:
+    """Recover the complete elements of a truncated ``{"field": [ ... ]}`` array.
+
+    A section cut off at the token cap leaves a partial array; ``raw_decode``
+    pulls one complete JSON value at a time and stops at the truncated tail, so
+    we keep every fully-formed item before the cut instead of losing the lot.
+    """
+    marker = raw.find(f'"{field}"')
+    start = raw.find("[", marker if marker >= 0 else 0)
+    if start < 0:
+        return []
+    decoder = json.JSONDecoder()
+    rest = raw[start + 1 :]
+    items: list[Any] = []
+    while True:
+        rest = rest.lstrip().lstrip(",").lstrip()
+        if not rest or rest[0] == "]":
+            break
+        try:
+            value, end = decoder.raw_decode(rest)
+        except json.JSONDecodeError:
+            break  # the truncated final element
+        items.append(value)
+        rest = rest[end:]
+    return items
 
 
 def _run_section(
@@ -252,6 +279,15 @@ def run_kbe(
     for field, guidance in _SECTION_GUIDANCE.items():
         try:
             raw = _run_section(paper_text, field, guidance, model_name, complete_fn)
+        except OutputTruncated as exc:
+            # The section hit the token cap: salvage the parseable prefix and
+            # label it as truncation (not a generic parse error), so the gap is
+            # visible and downstream sees a clear partial rather than silence.
+            recovered = [] if field == _TITLE_FIELD else _salvage_array(exc.text, field)
+            if recovered:
+                extracted[field] = recovered
+            failed[field] = f"output_truncated (recovered {len(recovered)} items)"
+            continue
         except Exception as exc:  # transport / LLM call failure for this section
             failed[field] = f"llm request failed: {exc}"
             transport_seen = True

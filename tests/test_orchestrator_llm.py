@@ -230,3 +230,19 @@ def test_litellm_backend_raises_after_exhausting_retries(monkeypatch):
 
     with pytest.raises(RuntimeError):
         _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+
+
+def test_run_agent_raises_on_truncated_final_answer():
+    from tools.orchestrator.llm import OutputTruncated
+
+    llm = FakeLLM([LLMResponse(text='{"a": [1, 2', finish_reason="length")])
+    with pytest.raises(OutputTruncated) as ei:
+        run_agent(system="s", user="u", model="m", complete_fn=llm,
+                  tool_runner=lambda *a, **k: None)
+    assert ei.value.text == '{"a": [1, 2'
+
+
+def test_run_agent_normal_finish_returns_text():
+    llm = FakeLLM([LLMResponse(text="ok", finish_reason="stop")])
+    assert run_agent(system="s", user="u", model="m", complete_fn=llm,
+                     tool_runner=lambda *a, **k: None) == "ok"

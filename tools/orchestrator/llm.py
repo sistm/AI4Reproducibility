@@ -39,6 +39,7 @@ class LLMResponse:
 
     text: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    finish_reason: str | None = None
 
 
 # A completion backend: (model, messages, tools) -> LLMResponse.
@@ -49,6 +50,22 @@ ToolRunner = Callable[..., Any]
 
 class AgentStepLimit(RuntimeError):
     """Raised when the tool loop exceeds ``max_steps`` without finishing."""
+
+
+# finish_reason values that mean the model hit the output-token cap mid-answer.
+_TRUNCATED_REASONS = {"length", "max_tokens", "model_length"}
+
+
+class OutputTruncated(RuntimeError):
+    """Raised when a final model answer was cut off at the token cap.
+
+    Carries the partial ``text`` so callers can salvage what parsed before the
+    cut, instead of silently treating a truncated answer as a parse error.
+    """
+
+    def __init__(self, text: str):
+        super().__init__("model output truncated at the token limit")
+        self.text = text
 
 
 def _litellm_complete(
@@ -94,7 +111,8 @@ def _litellm_complete(
         args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args or {})
         calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
 
-    return LLMResponse(text=message.content, tool_calls=calls)
+    finish_reason = getattr(response.choices[0], "finish_reason", None)
+    return LLMResponse(text=message.content, tool_calls=calls, finish_reason=finish_reason)
 
 
 def _assistant_message(resp: LLMResponse) -> dict[str, Any]:
@@ -150,6 +168,8 @@ def run_agent(
     for _ in range(max_steps):
         resp = complete_fn(model, messages, tools)
         if not resp.tool_calls:
+            if resp.finish_reason in _TRUNCATED_REASONS:
+                raise OutputTruncated(resp.text or "")
             return resp.text or ""
 
         messages.append(_assistant_message(resp))

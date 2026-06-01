@@ -202,3 +202,27 @@ def test_default_extract_propagates_tool_failure(monkeypatch):
         assert "encrypted" in str(exc)
     else:
         raise AssertionError("expected RuntimeError to propagate")
+
+
+def _truncating_backend(truncated_field, partial_text, valid):
+    def backend(model, messages, tools):
+        user = messages[-1]["content"]
+        if f'"{truncated_field}"' in user:
+            return LLMResponse(text=partial_text, finish_reason="length")
+        for field, payload in valid.items():
+            if f'"{field}"' in user:
+                return LLMResponse(text=payload)
+        return LLMResponse(text="{}")
+    return backend
+
+
+def test_truncated_section_salvages_prefix_and_marks_partial(tmp_path):
+    _seed_pdf(tmp_path, "trunc")
+    partial = '{"structured_knowledge": [{"k": "one"}, {"k": "two"}, {"k": "thr'
+    out = run_kbe("trunc", root=tmp_path,
+                  complete_fn=_truncating_backend("structured_knowledge", partial, _all_valid()),
+                  extract_fn=lambda p: LONG_TEXT)
+    assert out["status"] == "partial"
+    assert out["structured_knowledge"] == [{"k": "one"}, {"k": "two"}]
+    assert "output_truncated" in out["failure_reason"]
+    assert "structured_knowledge" in out["partial_data"]["sections_failed"]
