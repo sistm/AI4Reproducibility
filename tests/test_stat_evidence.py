@@ -68,3 +68,37 @@ def test_non_source_and_unreadable_files_skipped(tmp_path):
     ev = gather_stat_evidence(assets)
     assert "data.csv" not in ev["cqv-stat-test-assumptions"]
     # does not raise on the binary file; may or may not match after replacement
+
+
+def test_capitalised_method_names_match(tmp_path):
+    # Regression: patterns must be case-insensitive. Real MTP code capitalises
+    # method names and uses them in variable names / comments (bimj.202400278).
+    assets = tmp_path / "assets"
+    _write(
+        assets,
+        "DoFiguresTables.R",
+        "Delta.Bonf = rep(alpha / m , m)\n"
+        "Delta.Holm = alpha / (m : 1)\n"
+        "Delta.BH = alpha * (1 : m) / m  # Benjamini-Hochberg\n"
+        "R.BY = sum( p.sort <= Delta.BY )  # Benjamini-Yekutieli\n",
+    )
+    mt = gather_stat_evidence(assets)["cqv-stat-multiple-testing"]
+    assert mt, "capitalised MTP method names must be detected (case-insensitive)"
+    assert "Benjamini" in mt
+
+
+def test_hand_rolled_test_statistics_detected(tmp_path):
+    # Regression: methods/biostat code often computes tests by hand (a custom
+    # statistic fed through a CDF) rather than calling t.test/wilcox.test.
+    assets = tmp_path / "assets"
+    _write(
+        assets,
+        "p-valuesCompute.R",
+        "x0 = read.table('data.csv', header = TRUE, sep = ',')\n"
+        "w = x0[, 'W_FSTUWT']\n"
+        "Rbar = weighted.mean(R_ik, w)\n"
+        "pvalue.2tail = 2 * pt(-abs(T_N), df = df.w)  # Brunner-Munzel\n",
+    )
+    ev = gather_stat_evidence(assets)
+    assert ev["cqv-stat-test-assumptions"], "hand-rolled pt()-based test must be detected"
+    assert ev["cqv-stat-representative-sampling"], "survey-weight idioms must be detected"

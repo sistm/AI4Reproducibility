@@ -29,11 +29,16 @@ _MAX_FILE_BYTES = 1_000_000  # skip files larger than this (data dumps, etc.)
 
 
 def _patterns(*raw: str) -> list[re.Pattern[str]]:
-    return [re.compile(p) for p in raw]
+    # Case-insensitive: method names and idioms appear capitalised in real code
+    # (Bonferroni, Holm, BH) and in comments/variable names, not just lowercased.
+    return [re.compile(p, re.IGNORECASE) for p in raw]
 
 
 # item_id -> regexes that surface candidate call-sites for that check.
-# R and Python signatures are mixed; the judge sorts out relevance.
+# R and Python signatures are mixed; the judge sorts out relevance. Patterns
+# cover both library calls (t.test, p.adjust) AND hand-rolled statistics
+# (custom test statistics fed through pt()/pnorm(); MTP thresholds computed
+# directly), since methods and biostat code frequently implements tests by hand.
 PATTERNS: dict[str, list[re.Pattern[str]]] = {
     "cqv-stat-test-assumptions": _patterns(
         r"\bt\.test\s*\(", r"\bwilcox\.test\s*\(", r"\baov\s*\(", r"\banova\s*\(",
@@ -41,10 +46,18 @@ PATTERNS: dict[str, list[re.Pattern[str]]] = {
         r"\bshapiro\.test\s*\(", r"\bqqnorm\s*\(", r"\bleveneTest\s*\(", r"\bbartlett\.test\s*\(",
         r"ttest_(ind|rel|1samp)", r"\bmannwhitneyu\s*\(", r"\bf_oneway\s*\(",
         r"\bshapiro\s*\(", r"\blevene\s*\(", r"\bnormaltest\s*\(",
+        # hand-rolled tests: test statistic -> p-value via a CDF, or named tests
+        r"\bpt\s*\(", r"\bpnorm\s*\(", r"\bpchisq\s*\(", r"\bpf\s*\(",
+        r"brunner", r"munzel", r"kendall", r"wilcoxon", r"mann.?whitney",
+        r"p[._-]?values?\b", r"test.?statistic",
     ),
     "cqv-stat-multiple-testing": _patterns(
-        r"\bp\.adjust\s*\(", r"\bmultipletests\s*\(", r"bonferroni", r"\bfdr\b",
-        r"benjamini", r"\bholm\b",
+        r"\bp\.adjust\s*\(", r"\bmultipletests\s*\(",
+        # method names (any case) — appear in code, comments, and variable names
+        r"bonferroni", r"\bholm\b", r"sidak", r"šid", r"benjamini", r"hochberg",
+        r"yekutieli", r"\bfdr\b", r"\bfwer\b", r"\bmtp\b", r"\bBH\b", r"\bBY\b",
+        r"multiple.?test", r"family.?wise", r"false.?discovery", r"\bdelta\.",
+        # individual test calls (counting how many tests are run)
         r"\bt\.test\s*\(", r"\bwilcox\.test\s*\(", r"\bprop\.test\s*\(", r"\bchisq\.test\s*\(",
         r"\bfisher\.test\s*\(", r"\bcor\.test\s*\(",
         r"chi2_contingency", r"\bpearsonr\s*\(", r"\bspearmanr\s*\(",
@@ -54,27 +67,37 @@ PATTERNS: dict[str, list[re.Pattern[str]]] = {
         r"\bmice\s*\(", r"\bsample_frac\s*\(",
         r"train_test_split", r"\bKFold\b", r"cross_val", r"\bfit_transform\s*\(",
         r"StandardScaler", r"SimpleImputer", r"\bPipeline\s*\(", r"\.fit_transform\b",
+        r"train.?(set|data|index)", r"test.?(set|data|index)", r"\bimputation\b",
     ),
     "cqv-stat-ci-coverage": _patterns(
         r"\bconfint\s*\(", r"\bboot\s*\(", r"\bboot\.ci\s*\(", r"\bquantile\s*\(",
         r"\bconf_int\s*\(", r"\bbootstrap\s*\(", r"\bBCa\b", r"\.interval\s*\(",
         r"percentile", r"proportion_confint",
+        # Bayesian interval idioms
+        r"credible", r"\bHPD\b", r"\bHPDinterval\b", r"posterior.?(interval|quantile)",
     ),
     "cqv-stat-representative-sampling": _patterns(
         r"\bsample\s*\(", r"\bsample_frac\s*\(", r"\bsample_n\s*\(",
-        r"\bread\.csv\s*\(", r"\bread_csv\s*\(", r"\bfread\s*\(", r"\bread_excel\s*\(",
-        r"\bsubset\s*\(", r"\bfilter\s*\(", r"exclu", r"inclusion",
-        r"np\.random", r"\.sample\s*\(",
+        r"\bread\.csv\s*\(", r"\bread_csv\s*\(", r"\bread\.table\s*\(", r"\bfread\s*\(",
+        r"\bread_excel\s*\(", r"read_sav", r"\bsubset\s*\(", r"\bfilter\s*\(",
+        r"exclu", r"inclusion", r"np\.random", r"\.sample\s*\(",
+        # survey weighting (representativeness is usually handled via weights)
+        r"weighted\.mean", r"\bcov\.wt\s*\(", r"svydesign", r"\bsvy", r"\bweights?\b",
+        r"_WT\b", r"poststrat", r"\bstratif",
     ),
     "cqv-stat-no-post-hoc": _patterns(
         r"\blm\s*\(", r"\bglm\s*\(", r"\blmer\s*\(", r"\bformula\b",
         r"\bsubset\s*\(", r"\bfilter\s*\(", r"smf\.", r"\bols\s*\(",
+        r"exclu", r"\bdrop\b", r"post.?hoc", r"sensitivity", r"specif",
     ),
     "cqv-stat-model-diagnostics": _patterns(
         r"\bresiduals\s*\(", r"\bqqnorm\s*\(", r"\bqqPlot\s*\(", r"\bncvTest\s*\(",
         r"\boutlierTest\s*\(", r"\bplot\s*\(\s*\w*mod", r"\binfluence\s*\(",
         r"calibration", r"\broc\b", r"confusionMatrix", r"roc_curve", r"calibration_curve",
         r"\.resid\b", r"plot_diagnostics",
+        # MCMC convergence diagnostics for Bayesian models
+        r"burn.?in", r"\bgibbs\b", r"\bmcmc\b", r"traceplot", r"geweke", r"gelman",
+        r"\brhat\b", r"effectiveSize", r"n[._]eff", r"\bconverg",
     ),
 }
 
