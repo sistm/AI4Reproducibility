@@ -29,8 +29,9 @@ For each `also_enforces` entry:
 - Run the corresponding check. The entry's `note` summarises what to look
   for; most map to an existing static check or a file/pattern scan.
 - Record the finding in `cqv_output.json` keyed under the reproducibility
-  `id` verbatim (e.g. `bj-10-set-seed`), with file/line evidence, exactly
-  as for CQV's own items. Review attributes these to the reproducibility
+  `id` verbatim (e.g. `bj-10-set-seed`), with file/line evidence (cite
+  `{file, line}` only — never paste raw source; the orchestrator attaches the
+  exact source line), exactly as for CQV's own items. Review attributes these to the reproducibility
   rubric, so the id must be preserved unchanged.
 
 These items are run **in addition to** CQV's own items, never instead of

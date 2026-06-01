@@ -69,6 +69,10 @@ def _user_prompt(assets_dir: Path, review_title: str) -> str:
         "markdown fences — with these fields: status (success|partial|failed), "
         "repository_audit, code_method_alignment, dependency_validation, "
         "execution_readiness, reproducibility_blockers, partial_data, notes. "
+        "In every evidence entry cite only {\"file\": <path>, \"line\": <int>} "
+        "plus an optional short \"note\"; do NOT paste raw source code or a "
+        "\"snippet\" field — the orchestrator attaches the exact source line "
+        "from {file, line}, which keeps your JSON valid and the quotes precise. "
         "Do NOT include paper_id, audit_timestamp, or paper_title; the first two "
         "are set by the orchestrator and the third is outside your context."
     )
@@ -100,6 +104,55 @@ def _failure_output(
         "partial_data": None,
         "notes": "See repo_analysis.md for context.",
     }
+
+
+_MAX_SNIPPET_CHARS = 300
+
+
+def _read_source_line(assets_dir: Path, file_ref: str, line_no: int) -> str | None:
+    """Return the verbatim source line at ``file_ref:line_no``, or None.
+
+    The exact line is read from disk and later escaped by ``json.dumps`` — never
+    hand-escaped by the model — so precise code quotes reach the review without
+    the model being able to break its own JSON. Path-traversal-safe; never raises.
+    """
+    try:
+        base = assets_dir.resolve()
+        target = (assets_dir / file_ref).resolve()
+        if base != target and base not in target.parents:
+            return None  # ref escaped the assets directory
+        if not target.is_file():
+            return None
+        with target.open(encoding="utf-8", errors="replace") as fh:
+            for idx, line in enumerate(fh, start=1):
+                if idx == line_no:
+                    return line.rstrip("\n")[:_MAX_SNIPPET_CHARS]
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _rehydrate_evidence(node: Any, assets_dir: Path) -> None:
+    """Attach a verbatim ``snippet`` to every {file, line} evidence object.
+
+    Walks the audit recursively (the model decides the nesting) and, for any
+    dict carrying a string ``file`` and an int ``line``, splices in the exact
+    source line. Mutates in place; never raises.
+    """
+    if isinstance(node, dict):
+        file_ref = node.get("file")
+        line_no = node.get("line")
+        if isinstance(line_no, str) and line_no.isdigit():
+            line_no = int(line_no)
+        if isinstance(file_ref, str) and isinstance(line_no, int) and not isinstance(line_no, bool):
+            snippet = _read_source_line(assets_dir, file_ref, line_no)
+            if snippet is not None:
+                node["snippet"] = snippet
+        for value in node.values():
+            _rehydrate_evidence(value, assets_dir)
+    elif isinstance(node, list):
+        for item in node:
+            _rehydrate_evidence(item, assets_dir)
 
 
 def _normalise(obj: dict[str, Any], review_title: str) -> dict[str, Any]:
@@ -291,6 +344,7 @@ def run_cqv(
         return output
 
     output = _normalise(parsed, review_title)
+    _rehydrate_evidence(output, assets_dir)
     _apply_stat_layer(
         output, review_dir, assets_dir, model=model, complete_fn=complete_fn
     )

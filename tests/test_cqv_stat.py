@@ -99,3 +99,56 @@ def test_failed_audit_skips_stat_layer(tmp_path):
     out = run_cqv("empty", root=tmp_path, complete_fn=_backend(audit={}, verdict={}))
     assert out["status"] == "failed"
     assert "statistical_validity" not in out
+
+
+# ---------------------------------------------------------------------------
+# Evidence rehydration (precise quotes from disk, not model-escaped)
+# ---------------------------------------------------------------------------
+
+def _audit_backend(audit: dict):
+    """Fake: the main audit call returns `audit`; no stat code present."""
+    def fn(model, messages, tools):
+        return LLMResponse(text=json.dumps(audit))
+    return fn
+
+
+def test_evidence_rehydrated_with_verbatim_source_line(tmp_path):
+    code = ('main.path <- file.path("/Users/x")\n'
+            'setwd(file.path(main.path, "code"))\n')
+    _seed(tmp_path, "rehy", code)  # writes input/assets/analysis.R
+    audit = {
+        "status": "partial",
+        "repository_audit": {
+            "issues": [
+                {"id": "abs-path", "evidence": [{"file": "analysis.R", "line": 2}]}
+            ]
+        },
+        "reproducibility_blockers": [],
+    }
+    out = run_cqv("rehy", root=tmp_path, complete_fn=_audit_backend(audit))
+    ev = out["repository_audit"]["issues"][0]["evidence"][0]
+    assert ev["snippet"] == 'setwd(file.path(main.path, "code"))'  # exact, quotes intact
+
+
+def test_bad_file_or_line_reference_is_skipped_not_crashed(tmp_path):
+    _seed(tmp_path, "badref", "x <- 1\n")
+    audit = {
+        "status": "partial",
+        "repository_audit": {"e": [
+            {"file": "nope.R", "line": 1},
+            {"file": "analysis.R", "line": 999},
+        ]},
+        "reproducibility_blockers": [],
+    }
+    out = run_cqv("badref", root=tmp_path, complete_fn=_audit_backend(audit))
+    for e in out["repository_audit"]["e"]:
+        assert "snippet" not in e  # unresolved refs left untouched, no crash
+
+
+def test_path_traversal_reference_rejected(tmp_path):
+    _seed(tmp_path, "trav", "x <- 1\n")
+    audit = {"status": "partial",
+             "repository_audit": {"e": [{"file": "../../etc/passwd", "line": 1}]},
+             "reproducibility_blockers": []}
+    out = run_cqv("trav", root=tmp_path, complete_fn=_audit_backend(audit))
+    assert "snippet" not in out["repository_audit"]["e"][0]
