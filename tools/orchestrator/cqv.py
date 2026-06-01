@@ -286,6 +286,26 @@ _REPAIR_SYSTEM = (
 )
 
 
+def _repair_json_deterministic(text: str) -> dict[str, Any] | None:
+    """Best-effort structural repair of malformed model JSON — no model call.
+
+    Uses ``json_repair`` (optional, lazy-imported) to fix the structural slips
+    LLMs make in large nested output: missing commas, trailing commas, and
+    array/object confusion (e.g. ``"evidence": {obj}, {obj}]``). Returns the
+    parsed object, or None if the library is absent or yields a non-object.
+    Deterministic and never raises, so it is tried before the model reprompt.
+    """
+    try:
+        from json_repair import repair_json
+    except ImportError:
+        return None
+    try:
+        obj = repair_json(text, return_objects=True)
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 def _repair_json_once(
     bad_text: str, error: Exception, *, model: str, complete_fn: CompleteFn | None
 ) -> dict[str, Any] | None:
@@ -362,14 +382,23 @@ def run_cqv(
         _write_outputs(review_dir, output)
         return output
 
+    repaired_via: str | None = None
     try:
         parsed = parse_json_object(text)
     except (ValueError, json.JSONDecodeError) as exc:
-        # One repair reprompt before giving up: a single mis-escaped code snippet
-        # should not discard an otherwise-complete audit (LOGIC.md §6 degrade).
-        parsed = _repair_json_once(
-            text, exc, model=model or model_for("cqv"), complete_fn=complete_fn
-        )
+        # Salvage a structurally-malformed but complete audit rather than discard
+        # it (LOGIC.md §6 degrade). Deterministic repair first — no model round
+        # trip, fixes missing commas / array-object confusion / trailing commas —
+        # then one model reprompt, and only then give up.
+        parsed = _repair_json_deterministic(text)
+        if parsed is not None:
+            repaired_via = "deterministic"
+        else:
+            parsed = _repair_json_once(
+                text, exc, model=model or model_for("cqv"), complete_fn=complete_fn
+            )
+            if parsed is not None:
+                repaired_via = "reprompt"
         if parsed is None:
             output = _failure_output(
                 review_title, "output_parse_failed",
@@ -380,6 +409,17 @@ def run_cqv(
             return output
 
     output = _normalise(parsed, review_title)
+    if repaired_via is not None:
+        # Salvaged output is lower-confidence: repair can guess structure or even
+        # drop content. Flag it AND retain the raw bytes, so a human or Review can
+        # verify nothing material (e.g. a blocker) was lost. Never silent.
+        output["failure_mode"] = "output_recovered_by_repair"
+        marker = (
+            f"[recovered from malformed JSON via {repaired_via} repair; "
+            "raw model output retained in raw_model_output for verification]"
+        )
+        output["notes"] = f"{marker}\n{output.get('notes', '')}".strip()
+        output["raw_model_output"] = text
     _rehydrate_evidence(output, assets_dir)
     _apply_stat_layer(
         output, review_dir, assets_dir, model=model, complete_fn=complete_fn

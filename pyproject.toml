@@ -62,6 +62,9 @@ er = [
 # unit-test it — the agent loop is tested with an injected fake backend.
 orchestrator = [
     "litellm>=1.0",
+    # Optional, lazy-imported salvage: deterministically repairs malformed model
+    # JSON in the CQV parse path. Absent -> CQV falls back to a model reprompt.
+    "json_repair>=0.30",
 ]
 
 [project.urls]

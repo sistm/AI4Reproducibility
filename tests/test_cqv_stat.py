@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+import tools.orchestrator.cqv as cqv
 from tools.orchestrator.cqv import run_cqv
 from tools.orchestrator.llm import LLMResponse
 
@@ -167,7 +170,8 @@ def _repairing_backend(bad_text: str, good: dict):
     return fn
 
 
-def test_invalid_json_recovered_by_repair_reprompt(tmp_path):
+def test_invalid_json_recovered_by_repair_reprompt(tmp_path, monkeypatch):
+    monkeypatch.setattr(cqv, "_repair_json_deterministic", lambda text: None)
     _seed(tmp_path, "repair", "x <- 1\n")
     bad = '{"status": "partial", "notes": "audit" "execution_readiness": "ready"}'  # missing comma
     good = {"status": "partial", "execution_readiness": "ready",
@@ -175,11 +179,12 @@ def test_invalid_json_recovered_by_repair_reprompt(tmp_path):
     out = run_cqv("repair", root=tmp_path, complete_fn=_repairing_backend(bad, good))
     assert out["status"] == "partial"
     assert out["failure_mode"] != "output_parse_failed" if "failure_mode" in out else True
-    assert out["notes"] == "recovered audit"
+    assert "recovered audit" in out["notes"]
     assert out["execution_readiness"] == "ready"
 
 
-def test_unrecoverable_json_falls_back_and_keeps_full_raw(tmp_path):
+def test_unrecoverable_json_falls_back_and_keeps_full_raw(tmp_path, monkeypatch):
+    monkeypatch.setattr(cqv, "_repair_json_deterministic", lambda text: None)
     _seed(tmp_path, "unrec", "x <- 1\n")
     bad = '{"status": "partial" "broken'  # malformed; repair also fails
 
@@ -190,3 +195,57 @@ def test_unrecoverable_json_falls_back_and_keeps_full_raw(tmp_path):
     assert out["failure_mode"] == "output_parse_failed"
     assert out["status"] == "partial"
     assert bad in out["notes"]  # full raw output preserved, not truncated away
+
+
+# ---------------------------------------------------------------------------
+# Deterministic repair salvage (0028) — recovers structurally-malformed JSON
+# ---------------------------------------------------------------------------
+
+def test_deterministic_repair_recovers_simple_delimiter_error(tmp_path):
+    pytest.importorskip("json_repair")
+    _seed(tmp_path, "detrep", "x <- 1\n")
+    bad = '{"status": "partial", "execution_readiness": "ready" "reproducibility_blockers": []}'
+
+    def backend(model, messages, tools):
+        return LLMResponse(text=bad)
+
+    out = run_cqv("detrep", root=tmp_path, complete_fn=backend)
+    assert out["failure_mode"] == "output_recovered_by_repair"
+    assert "deterministic" in out["notes"]
+    assert out["execution_readiness"] == "ready"  # field recovered faithfully
+
+
+def test_repaired_output_is_flagged_and_keeps_raw_for_verification(tmp_path):
+    # Repair is best-effort and can drop content; the audit must never present a
+    # salvaged result without the marker AND the raw bytes for verification.
+    pytest.importorskip("json_repair")
+    _seed(tmp_path, "detraw", "x <- 1\n")
+    bad = (
+        '{"status": "partial", "execution_readiness": {"blockers": '
+        '[{"id": "R-2", "evidence": {"file": "a.R", "line": 20}, '
+        '{"file": "a.R", "line": 150}]}]}}'  # nested object/array confusion
+    )
+
+    def backend(model, messages, tools):
+        return LLMResponse(text=bad)
+
+    out = run_cqv("detraw", root=tmp_path, complete_fn=backend)
+    assert out["failure_mode"] == "output_recovered_by_repair"
+    assert out["raw_model_output"] == bad  # raw retained even though repair guessed
+
+
+def test_reprompt_used_when_deterministic_repair_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(cqv, "_repair_json_deterministic", lambda text: None)
+    _seed(tmp_path, "fallback", "x <- 1\n")
+    bad = '{"status": "partial" "execution_readiness": "ready"}'
+    good = {"status": "partial", "execution_readiness": "ready",
+            "reproducibility_blockers": [], "notes": "via reprompt"}
+
+    def backend(model, messages, tools):
+        if "repair malformed JSON" in messages[0]["content"]:
+            return LLMResponse(text=json.dumps(good))
+        return LLMResponse(text=bad)
+
+    out = run_cqv("fallback", root=tmp_path, complete_fn=backend)
+    assert out["failure_mode"] == "output_recovered_by_repair"
+    assert "reprompt" in out["notes"]
