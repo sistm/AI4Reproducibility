@@ -7,16 +7,46 @@ Statistical errors in production code lead to incorrect decisions in finance, me
 ## P-Value Misuse
 
 ### Multiple Testing Without Correction
+
+**Key principle:** A multiple-testing correction is any formal statistical
+procedure designed to control a family-wise error rate (FWER) or false
+discovery rate (FDR) across a collection of hypotheses.  `p.adjust()` is one
+implementation, but it is not the only valid form.  Step-up and step-down
+threshold procedures (Bonferroni, Holm, Benjamini–Hochberg, Benjamini–Yekutieli,
+Sidak, …), sequential/online methods, permutation-based procedures, and
+Bayesian approaches (e.g. Dirichlet-process MTP sensitivity analysis) all
+constitute legitimate corrections.
+
+**Do NOT flag as "missing correction" when:**
+- The code applies rejection thresholds derived from a formal MTP to a set of
+  p-values (even if it does not call `p.adjust()` explicitly).
+- The analysis is a *methodological study of MTPs themselves* — e.g. comparing
+  how many hypotheses different procedures reject, or quantifying sensitivity to
+  procedure choice — and the raw p-values are the *inputs* to those procedures,
+  not uncorrected final inference.
+- The paper explicitly acknowledges operating on raw p-values as part of the
+  stated method and claims error-rate control through a formal procedure applied
+  downstream.
+
+**Do flag as a problem when:**
+- Multiple tests are run and the smallest (or any cherry-picked) p-value is
+  reported as a final result with no acknowledgement of multiplicity.
+- Inference is drawn directly from uncorrected p-values in a setting where FWER
+  or FDR inflation is a real concern and no formal procedure is applied anywhere
+  in the pipeline.
+
 ```r
-# BAD: Test 20 hypotheses, report lowest p-value
+# BAD: Test 20 hypotheses, report lowest p-value with no correction
 p_values <- sapply(1:20, function(i) {
   t.test(rnorm(50), rnorm(50))$p.value
 })
-min(p_values)  # ~0.05 even with no real differences
+min(p_values)  # ~0.05 even with no real differences — inflation ignored
 
-# GOOD: Apply correction
-p.adjust(p_values, method = "bonferroni")
-p.adjust(p_values, method = "fdr")  # Benjamini-Hochberg
+# GOOD: Apply any formal multiple-testing procedure
+p.adjust(p_values, method = "bonferroni")   # one option
+p.adjust(p_values, method = "fdr")          # Benjamini-Hochberg — another option
+# Also valid: step-up/step-down threshold comparison, FWER/FDR-controlling
+# sequential methods, Bayesian MTP sensitivity analysis, etc.
 ```
 
 ### P-Hacking Patterns
@@ -352,7 +382,7 @@ unverified when no plan is available to compare against.
 
 - [ ] Statistical test assumptions checked
 - [ ] Effect sizes reported alongside p-values
-- [ ] Multiple testing correction applied
+- [ ] Multiple testing addressed by a formal procedure (p.adjust, step-up/step-down thresholds, Bayesian MTP, etc.) where multiplicity is a concern
 - [ ] Confidence intervals constructed by a method appropriate to the estimand
 - [ ] Cross-validation proper (no leakage)
 - [ ] Model diagnostics examined
