@@ -278,6 +278,37 @@ def _apply_stat_layer(
         output["reproducibility_blockers"] = output.get("reproducibility_blockers", []) + promoted
 
 
+_REPAIR_SYSTEM = (
+    "You repair malformed JSON. The user gives a string that was meant to be a "
+    "single JSON object but failed to parse. Return ONLY the corrected, valid "
+    "JSON object with exactly the same content — no prose, no markdown fences. "
+    "Fix delimiters and escaping; do not add, drop, or summarise any content."
+)
+
+
+def _repair_json_once(
+    bad_text: str, error: Exception, *, model: str, complete_fn: CompleteFn | None
+) -> dict[str, Any] | None:
+    """One best-effort reprompt to turn malformed model JSON into valid JSON.
+
+    LLMs reliably fix their own JSON when told the exact parser error (the
+    observed failure was a missing comma where a code snippet was embedded).
+    Returns the parsed object, or None if the repair also fails to parse.
+    Never raises.
+    """
+    user = (
+        f"This was supposed to be one JSON object but failed to parse with:\n"
+        f"{error}\n\nReturn the corrected JSON object, same content:\n\n{bad_text}"
+    )
+    agent_kwargs: dict[str, Any] = {"system": _REPAIR_SYSTEM, "user": user, "model": model}
+    if complete_fn is not None:
+        agent_kwargs["complete_fn"] = complete_fn
+    try:
+        return parse_json_object(run_agent(**agent_kwargs))
+    except Exception:
+        return None
+
+
 def run_cqv(
     review_title: str,
     *,
@@ -334,14 +365,19 @@ def run_cqv(
     try:
         parsed = parse_json_object(text)
     except (ValueError, json.JSONDecodeError) as exc:
-        output = _failure_output(
-            review_title, "output_parse_failed",
-            f"model output was not valid JSON: {exc}", status="partial",
+        # One repair reprompt before giving up: a single mis-escaped code snippet
+        # should not discard an otherwise-complete audit (LOGIC.md §6 degrade).
+        parsed = _repair_json_once(
+            text, exc, model=model or model_for("cqv"), complete_fn=complete_fn
         )
-        output["notes"] = f"Raw model output (truncated):\n{text[:2000]}"
-        # keep the default blocker from _failure_output
-        _write_outputs(review_dir, output)
-        return output
+        if parsed is None:
+            output = _failure_output(
+                review_title, "output_parse_failed",
+                f"model output was not valid JSON: {exc}", status="partial",
+            )
+            output["notes"] = f"Raw model output:\n{text}"
+            _write_outputs(review_dir, output)
+            return output
 
     output = _normalise(parsed, review_title)
     _rehydrate_evidence(output, assets_dir)

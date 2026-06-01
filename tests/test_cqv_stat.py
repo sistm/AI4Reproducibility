@@ -152,3 +152,41 @@ def test_path_traversal_reference_rejected(tmp_path):
              "reproducibility_blockers": []}
     out = run_cqv("trav", root=tmp_path, complete_fn=_audit_backend(audit))
     assert "snippet" not in out["repository_audit"]["e"][0]
+
+
+# ---------------------------------------------------------------------------
+# Parse-failure repair reprompt (recover a good audit from one bad comma)
+# ---------------------------------------------------------------------------
+
+def _repairing_backend(bad_text: str, good: dict):
+    """Audit call returns invalid JSON; the repair reprompt returns valid JSON."""
+    def fn(model, messages, tools):
+        if "repair malformed JSON" in messages[0]["content"]:
+            return LLMResponse(text=json.dumps(good))
+        return LLMResponse(text=bad_text)
+    return fn
+
+
+def test_invalid_json_recovered_by_repair_reprompt(tmp_path):
+    _seed(tmp_path, "repair", "x <- 1\n")
+    bad = '{"status": "partial", "notes": "audit" "execution_readiness": "ready"}'  # missing comma
+    good = {"status": "partial", "execution_readiness": "ready",
+            "reproducibility_blockers": [], "notes": "recovered audit"}
+    out = run_cqv("repair", root=tmp_path, complete_fn=_repairing_backend(bad, good))
+    assert out["status"] == "partial"
+    assert out["failure_mode"] != "output_parse_failed" if "failure_mode" in out else True
+    assert out["notes"] == "recovered audit"
+    assert out["execution_readiness"] == "ready"
+
+
+def test_unrecoverable_json_falls_back_and_keeps_full_raw(tmp_path):
+    _seed(tmp_path, "unrec", "x <- 1\n")
+    bad = '{"status": "partial" "broken'  # malformed; repair also fails
+
+    def always_bad(model, messages, tools):
+        return LLMResponse(text=bad)  # repair call also returns junk
+
+    out = run_cqv("unrec", root=tmp_path, complete_fn=always_bad)
+    assert out["failure_mode"] == "output_parse_failed"
+    assert out["status"] == "partial"
+    assert bad in out["notes"]  # full raw output preserved, not truncated away
