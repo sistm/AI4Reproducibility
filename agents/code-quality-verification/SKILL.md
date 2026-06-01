@@ -223,6 +223,14 @@ to `null` or empty arrays. Use `partial_data` to record which checks ran:
 }
 ```
 
+### Output shape constraints
+
+Keep the final JSON flat and emit each top-level field exactly once:
+
+- Every `evidence` value MUST be a JSON **array** of `{file, line, note?}` objects — never a bare object, and never opened with `{`. Cite `{file, line}` only; the orchestrator attaches the exact source line.
+- Do NOT restate `dependency_validation`, `execution_readiness`, or the blockers both nested inside `repository_audit` and at the top level.
+- Do NOT list the same blocker `id` more than once; the orchestrator keeps only the first occurrence.
+
 ### Behavioral rules
 
 1. NEVER raise an unhandled exception. Wrap every tool invocation and

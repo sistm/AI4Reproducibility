@@ -73,6 +73,11 @@ def _user_prompt(assets_dir: Path, review_title: str) -> str:
         "plus an optional short \"note\"; do NOT paste raw source code or a "
         "\"snippet\" field — the orchestrator attaches the exact source line "
         "from {file, line}, which keeps your JSON valid and the quotes precise. "
+        "Each evidence value MUST be a JSON array, e.g. [{\"file\": ..., \"line\": "
+        "...}] — never open it with '{'. Emit each top-level field exactly ONCE "
+        "and keep the object flat: do NOT restate dependency_validation, "
+        "execution_readiness, or the blockers both nested inside repository_audit "
+        "and at the top level, and do NOT list the same blocker id twice. "
         "Do NOT include paper_id, audit_timestamp, or paper_title; the first two "
         "are set by the orchestrator and the third is outside your context."
     )
@@ -170,7 +175,19 @@ def _normalise(obj: dict[str, Any], review_title: str) -> dict[str, Any]:
     obj.setdefault("notes", "")
 
     blockers = obj.get("reproducibility_blockers")
-    obj["reproducibility_blockers"] = blockers if isinstance(blockers, list) else []
+    blockers = blockers if isinstance(blockers, list) else []
+    # Collapse duplicated blockers (the model tends to restate the same id both
+    # nested in repository_audit and at the top level): keep first per id.
+    seen: set[str] = set()
+    deduped: list[Any] = []
+    for blocker in blockers:
+        bid = blocker.get("id") if isinstance(blocker, dict) else None
+        if isinstance(bid, str):
+            if bid in seen:
+                continue
+            seen.add(bid)
+        deduped.append(blocker)
+    obj["reproducibility_blockers"] = deduped
     # rule 5: a non-success status must always carry at least one blocker.
     if obj["status"] != "success" and not obj["reproducibility_blockers"]:
         obj["reproducibility_blockers"] = [_default_blocker(obj.get("failure_reason"))]

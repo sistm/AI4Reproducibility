@@ -249,3 +249,49 @@ def test_reprompt_used_when_deterministic_repair_unavailable(tmp_path, monkeypat
     out = run_cqv("fallback", root=tmp_path, complete_fn=backend)
     assert out["failure_mode"] == "output_recovered_by_repair"
     assert "reprompt" in out["notes"]
+
+
+# ---------------------------------------------------------------------------
+# Schema tightening (0029) — dedupe duplicated blockers; state the contract
+# ---------------------------------------------------------------------------
+
+def test_duplicate_blocker_ids_collapsed(tmp_path):
+    _seed(tmp_path, "dedup", "x <- 1\n")
+    audit = {
+        "status": "partial",
+        "reproducibility_blockers": [
+            {"id": "bj-14", "severity": "HIGH", "description": "abs path"},
+            {"id": "bj-10", "severity": "HIGH", "description": "no seed"},
+            {"id": "bj-14", "severity": "HIGH", "description": "abs path (dup)"},
+        ],
+    }
+
+    def backend(model, messages, tools):
+        return LLMResponse(text=json.dumps(audit))
+
+    out = run_cqv("dedup", root=tmp_path, complete_fn=backend)
+    ids = [b["id"] for b in out["reproducibility_blockers"]]
+    assert ids.count("bj-14") == 1  # duplicate collapsed
+    assert "bj-10" in ids
+    # first occurrence kept (not the "(dup)" one)
+    bj14 = next(b for b in out["reproducibility_blockers"] if b["id"] == "bj-14")
+    assert bj14["description"] == "abs path"
+
+
+def test_blockers_without_id_are_all_kept(tmp_path):
+    _seed(tmp_path, "noid", "x <- 1\n")
+    audit = {"status": "partial", "reproducibility_blockers": [
+        {"severity": "HIGH", "description": "a"}, {"severity": "LOW", "description": "b"}]}
+
+    def backend(model, messages, tools):
+        return LLMResponse(text=json.dumps(audit))
+
+    out = run_cqv("noid", root=tmp_path, complete_fn=backend)
+    assert len(out["reproducibility_blockers"]) == 2  # no id -> never dropped
+
+
+def test_prompt_states_evidence_array_and_no_duplication():
+    from tools.orchestrator.cqv import _user_prompt
+    prompt = _user_prompt(Path("/tmp/assets"), "x")
+    assert "must be a JSON array" in prompt.replace("MUST", "must")
+    assert "exactly ONCE" in prompt or "exactly once" in prompt.lower()
