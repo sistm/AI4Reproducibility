@@ -156,11 +156,11 @@ def test_model_for_unknown_stage_raises(monkeypatch):
 
 def test_call_params_default_and_env_override(monkeypatch):
     monkeypatch.delenv("AI4R_MAX_TOKENS", raising=False)
-    assert max_tokens() == 8192
+    assert max_tokens() == 12000
     monkeypatch.setenv("AI4R_MAX_TOKENS", "16000")
     assert max_tokens() == 16000
     monkeypatch.setenv("AI4R_MAX_TOKENS", "not-an-int")  # bad value falls back
-    assert max_tokens() == 8192
+    assert max_tokens() == 12000
 
 
 def test_litellm_backend_passes_call_params(monkeypatch):

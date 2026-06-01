@@ -53,7 +53,7 @@ def model_for(stage: str) -> str:
 # context window. Override via AI4R_MAX_TOKENS / AI4R_REQUEST_TIMEOUT /
 # AI4R_NUM_RETRIES.
 
-_DEFAULT_MAX_TOKENS = 8192
+_DEFAULT_MAX_TOKENS = 12000
 _DEFAULT_REQUEST_TIMEOUT = 120  # seconds
 _DEFAULT_NUM_RETRIES = 2
 
