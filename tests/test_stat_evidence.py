@@ -102,3 +102,34 @@ def test_hand_rolled_test_statistics_detected(tmp_path):
     ev = gather_stat_evidence(assets)
     assert ev["cqv-stat-test-assumptions"], "hand-rolled pt()-based test must be detected"
     assert ev["cqv-stat-representative-sampling"], "survey-weight idioms must be detected"
+
+
+# ---------------------------------------------------------------------------
+# Evidence budget: large implementation blocks must reach the judge (0030)
+# Regression for bimj.202400278: the MTP-correction block (Delta.Bonf/Holm/BH/BY)
+# was dropped whole because it exceeded the remaining per-check budget, so the
+# multiple-testing judge saw only comments and false-FAILed "no correction".
+# ---------------------------------------------------------------------------
+
+def test_oversized_block_is_truncated_not_dropped(tmp_path):
+    assets = tmp_path / "assets"
+    code = "\n".join(f"Delta.Bonf = alpha / m  # threshold line {i}" for i in range(100))
+    _write(assets, "a.R", code + "\n")
+    # one merged block far exceeds this tiny budget; old code dropped it -> ""
+    ev = gather_stat_evidence(assets, max_chars=300)["cqv-stat-multiple-testing"]
+    assert ev, "oversized block must be truncated, not dropped to empty"
+    assert "Delta.Bonf" in ev
+    assert "truncated" in ev
+
+
+def test_default_budget_surfaces_large_implementation_block(tmp_path):
+    assets = tmp_path / "assets"
+    lines = ["# overview of multiple testing and FDR control"]   # small comment block
+    lines += ["sep <- 0"] * 5                                     # non-matching gap
+    lines += [f"Delta.Bonf_{i} = alpha / m  # bonferroni {i}" for i in range(150)]  # big code block
+    _write(assets, "analysis.R", "\n".join(lines) + "\n")
+    ev = gather_stat_evidence(assets)["cqv-stat-multiple-testing"]
+    # at the old 4000 budget the comment block consumed the lead and the big code
+    # block was dropped; at the raised budget the implementation is represented
+    assert "Delta.Bonf_0" in ev
+    assert "Delta.Bonf_149" in ev or "truncated" in ev

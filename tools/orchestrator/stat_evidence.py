@@ -26,6 +26,7 @@ from pathlib import Path
 # Source files worth scanning. ``.R`` lowercases to ``.r``; ``.Rmd`` to ``.rmd``.
 _SOURCE_SUFFIXES = {".r", ".py", ".rmd", ".qmd"}
 _MAX_FILE_BYTES = 1_000_000  # skip files larger than this (data dumps, etc.)
+_MIN_BLOCK_CHARS = 200  # don't bother appending a truncated sliver smaller than this
 
 
 def _patterns(*raw: str) -> list[re.Pattern[str]]:
@@ -136,13 +137,15 @@ def _merge_windows(hits: list[int], window: int, n_lines: int) -> list[tuple[int
 
 
 def gather_stat_evidence(
-    assets_dir: Path, *, window: int = 3, max_chars: int = 4000
+    assets_dir: Path, *, window: int = 3, max_chars: int = 8000
 ) -> dict[str, str]:
     """Return ``{item_id: code-evidence}`` for each statistical-validity check.
 
     Evidence is matching call-sites plus ``window`` lines of context, labelled
-    ``# <relpath>:<start>-<end>``. Capped at ``max_chars`` per check. A check
-    with no matches gets ``""`` (⇒ not_applicable downstream). Never raises.
+    ``# <relpath>:<start>-<end>``. Capped at ``max_chars`` per check; an oversized
+    block is truncated (not dropped) so a large implementation block cannot lose
+    the budget to small comment/header snippets. A check with no matches gets
+    ``""`` (⇒ not_applicable downstream). Never raises.
     """
     files = [(p, _read_lines(p)) for p in _iter_source_files(assets_dir)]
     evidence: dict[str, str] = {}
@@ -164,6 +167,15 @@ def gather_stat_evidence(
                 body = "\n".join(f"{n + 1}: {lines[n]}" for n in range(start, end))
                 block = f"# {label}:{start + 1}-{end}\n{body}"
                 if total + len(block) > max_chars:
+                    # Truncate rather than drop: a large implementation block is
+                    # usually the most relevant evidence and must not lose the
+                    # budget to small comment/header snippets (bimj.202400278 —
+                    # the MTP-correction block was dropped whole, which starved
+                    # the multiple-testing judge into a false "no correction").
+                    remaining = max_chars - total
+                    if remaining >= _MIN_BLOCK_CHARS:
+                        blocks.append(block[:remaining].rstrip() + "\n# … (truncated)")
+                    total = max_chars
                     break
                 blocks.append(block)
                 total += len(block) + 2
