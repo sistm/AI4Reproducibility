@@ -11,7 +11,12 @@ import json
 from pathlib import Path
 
 from tools.orchestrator.llm import LLMResponse
-from tools.orchestrator.review import _MD_OUTPUTS, run_review
+from tools.orchestrator.review import (
+    _MD_OUTPUTS,
+    _SOURCE_CAP,
+    _context_blob,
+    run_review,
+)
 
 # The 10 top-level keys validate_review.sh requires in risk_matrix.json.
 REQUIRED_KEYS = {
@@ -159,3 +164,122 @@ def test_log_written(tmp_path):
     run_review("p", root=tmp_path, complete_fn=_backend())
     log = (tmp_path / "ai4r" / "p" / "logs" / "workflow.log").read_text()
     assert "REVIEW assessment_status=complete" in log
+
+
+# ---------------------------------------------------------------------------
+# _context_blob — selective serialisation (patch 0033)
+# ---------------------------------------------------------------------------
+
+def test_kbe_bookkeeping_fields_stripped():
+    """_KBE_STRIP fields must not appear in the serialised kbe blob."""
+    kbe = {
+        "paper_id": "p",
+        "paper_title": "T",
+        "status": "success",
+        "structured_knowledge": [{"type": "method", "content": "DP MTP"}],
+        "partial_data": {"should": "be stripped"},
+        "notes": "internal note",
+        "extraction_timestamp": "2026-06-02T00:00:00Z",
+    }
+    blob = _context_blob(kbe, None, None)
+    assert "partial_data" not in blob
+    assert "internal note" not in blob
+    assert "extraction_timestamp" not in blob
+    # Substantive fields must survive
+    assert "structured_knowledge" in blob
+    assert "DP MTP" in blob
+
+
+def test_cqv_bookkeeping_fields_stripped():
+    """_CQV_STRIP fields must not appear in the serialised cqv blob."""
+    cqv = {
+        "status": "partial",
+        "paper_id": "p",
+        "repository_audit": {"code_method_alignment": []},
+        "statistical_validity": [{"item_id": "cqv-stat-multiple-testing", "verdict": "fail"}],
+        "raw_model_output": "huge raw string",
+        "partial_data": {"checks_failed": ["check_absolute_paths"]},
+        "notes": "static checks completed",
+        "audit_timestamp": "2026-06-02T05:17:45Z",
+        "dependency_validation": None,
+        "execution_readiness": "unknown",
+    }
+    blob = _context_blob(None, cqv, None)
+    assert "raw_model_output" not in blob
+    assert "huge raw string" not in blob
+    assert "audit_timestamp" not in blob
+    assert "execution_readiness" not in blob
+    # Substantive fields must survive
+    assert "statistical_validity" in blob
+    assert "cqv-stat-multiple-testing" in blob
+    assert "repository_audit" in blob
+
+
+def test_all_stat_judges_visible_after_strip(tmp_path):
+    """All 7 stat-validity judges from the smoke-test CQV must be visible."""
+    import json as _json
+
+    cqv = _json.loads(
+        (Path(__file__).parent.parent /
+         "ai4r" / "smoke-test" / "cqv" / "cqv_output.json").read_text()
+    ) if (
+        Path(__file__).parent.parent /
+        "ai4r" / "smoke-test" / "cqv" / "cqv_output.json"
+    ).is_file() else _json.loads(
+        # fallback: use the uploaded fixture if the smoke-test dir isn't present
+        open("/mnt/user-data/uploads/cqv_output.json").read()
+    )
+
+    blob = _context_blob(None, cqv, None)
+    expected_judges = [
+        "cqv-stat-test-assumptions",
+        "cqv-stat-multiple-testing",
+        "cqv-stat-no-data-leakage",
+        "cqv-stat-ci-coverage",
+        "cqv-stat-representative-sampling",
+        "cqv-stat-no-post-hoc",
+        "cqv-stat-model-diagnostics",
+    ]
+    for judge_id in expected_judges:
+        assert judge_id in blob, f"stat judge {judge_id!r} missing from context blob"
+
+
+def test_source_cap_appends_truncation_marker():
+    """When a source exceeds _SOURCE_CAP chars the blob ends with [truncated]."""
+    big_kbe = {"paper_id": "p", "data": "x" * (_SOURCE_CAP + 1000)}
+    blob = _context_blob(big_kbe, None, None)
+    assert "[truncated]" in blob
+
+
+def test_source_cap_is_not_triggered_on_real_outputs():
+    """Real smoke-test KBE and CQV must fit within _SOURCE_CAP after stripping."""
+    import json as _json
+
+    try:
+        kbe = _json.loads(open("/mnt/user-data/uploads/kbe_output.json").read())
+        cqv = _json.loads(open("/mnt/user-data/uploads/cqv_output.json").read())
+    except FileNotFoundError:
+        import pytest
+        pytest.skip("smoke-test fixtures not available in this environment")
+
+    blob = _context_blob(kbe, cqv, None)
+    assert "[truncated]" not in blob, (
+        "Real smoke-test outputs exceed _SOURCE_CAP after stripping — "
+        "either outputs have grown or _SOURCE_CAP needs adjusting"
+    )
+
+
+def test_er_none_omitted_from_blob():
+    """When er is None the blob must contain exactly kbe and cqv sections."""
+    blob = _context_blob({"status": "success"}, {"status": "partial"}, None)
+    assert "er_output:" not in blob
+    assert "kbe_output:" in blob
+    assert "cqv_output:" in blob
+
+
+def test_er_present_included_unstripped():
+    """ER output is passed through as-is (no strip set)."""
+    er = {"status": "skipped", "reason": "deferred", "internal_note": "keep this"}
+    blob = _context_blob(None, None, er)
+    assert "er_output:" in blob
+    assert "internal_note" in blob

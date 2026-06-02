@@ -107,15 +107,34 @@ def _score_from_level(level: str) -> int:
     return {"LOW": 12, "MEDIUM": 38, "HIGH": 63, "CRITICAL": 88}.get(level, 50)
 
 
+# Fields that are internal pipeline bookkeeping — never cited by Review and
+# stripped before serialising to keep the context budget for audit substance.
+_KBE_STRIP: frozenset[str] = frozenset({"partial_data", "notes", "extraction_timestamp"})
+_CQV_STRIP: frozenset[str] = frozenset(
+    {"raw_model_output", "partial_data", "notes", "audit_timestamp",
+     "dependency_validation", "execution_readiness"}
+)
+# Hard per-source character cap: a guard against future bloat, not a budget.
+_SOURCE_CAP = 20_000
+
+
 def _context_blob(kbe: Any, cqv: Any, er: Any) -> str:
-    def one(name: str, data: Any) -> str:
+    def one(name: str, data: Any, strip: frozenset[str]) -> str:
         if data is None:
             return f"{name}_output: (unavailable)"
-        return f"{name}_output:\n{json.dumps(data, ensure_ascii=False)[:6000]}"
+        slim = (
+            {k: v for k, v in data.items() if k not in strip}
+            if isinstance(data, dict)
+            else data
+        )
+        serialised = json.dumps(slim, ensure_ascii=False)
+        if len(serialised) > _SOURCE_CAP:
+            serialised = serialised[:_SOURCE_CAP] + "\n... [truncated]"
+        return f"{name}_output:\n{serialised}"
 
-    parts = [one("kbe", kbe), one("cqv", cqv)]
+    parts = [one("kbe", kbe, _KBE_STRIP), one("cqv", cqv, _CQV_STRIP)]
     if er is not None:
-        parts.append(one("er", er))
+        parts.append(one("er", er, frozenset()))
     return "\n\n".join(parts)
 
 
