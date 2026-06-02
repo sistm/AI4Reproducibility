@@ -133,3 +133,12 @@ def test_default_budget_surfaces_large_implementation_block(tmp_path):
     # block was dropped; at the raised budget the implementation is represented
     assert "Delta.Bonf_0" in ev
     assert "Delta.Bonf_149" in ev or "truncated" in ev
+
+
+def test_sampling_rubric_covers_survey_weights_and_multiscript():
+    from tools.orchestrator.stat_judges import STAT_CHECKS
+    rubric = next(c.rubric for c in STAT_CHECKS if c.item_id == "cqv-stat-representative-sampling")
+    assert "weighted" in rubric.lower()
+    assert "svy" in rubric.lower() or "survey" in rubric.lower()
+    assert "ALL scripts" in rubric or "all scripts" in rubric.lower()
+    assert "NOT a convenience sample" in rubric or "not a convenience" in rubric.lower()
