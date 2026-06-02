@@ -47,7 +47,21 @@ def _seed(root: Path, title: str, kbe: dict | None, cqv: dict | None) -> None:
         (base / "cqv" / "cqv_output.json").write_text(json.dumps(cqv))
 
 
-def _backend(core: str = GOOD_CORE, md: str = "# report\n"):
+# Default md stub satisfies all three structural validators (heading, verdict
+# token, [PASS] checklist token) and clears the _MIN_MD_CHARS threshold.
+_GOOD_MD = (
+    "# Review report\n\n"
+    "Verdict: **MINOR REVISION**\n\n"
+    "## Checklist\n"
+    "- [x] **[PASS]** bj-01-readme — README is present.\n"
+    "- [x] **[PASS]** bj-02-run-instructions — entry point identified.\n\n"
+    "Overall this is a placeholder body whose only purpose is to be long enough "
+    "to satisfy the per-section minimum-length validator while carrying the "
+    "structural markers each markdown file needs.\n"
+)
+
+
+def _backend(core: str = GOOD_CORE, md: str = _GOOD_MD):
     def b(model, messages, tools):
         u = messages[-1]["content"]
         if '"risk_score"' in u and "Return ONLY" in u:
@@ -208,10 +222,88 @@ def test_markdown_failure_is_placeholdered_not_fatal(tmp_path):
         raise RuntimeError("md boom")  # all markdown calls fail
 
     rm = run_review("p", root=tmp_path, complete_fn=flaky)
-    assert rm["assessment_status"] == "complete"  # verdict stands
+    # All md placeholders are too short to pass _validate_md_section -> partial.
+    # Verdict still stands (risk_matrix synthesis succeeded), files exist,
+    # original generation-failure diagnostic is preserved on disk.
+    assert rm["assessment_status"] == "partial"
+    assert rm["verdict"] == "MINOR REVISION"
+    assert "markdown validation failed" in rm["notes"]
     assert _files_exist(tmp_path, "p")
     fr = (tmp_path / "ai4r" / "p" / "review" / "final_review.md").read_text()
-    assert "Generation failed" in fr
+    assert "Generation failed" in fr  # diagnostic kept, not overwritten
+
+
+def test_md_validation_empty_section_degrades_to_partial(tmp_path):
+    """A model returning whitespace for an md call degrades complete -> partial."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+
+    def per_file(model, messages, tools):
+        u = messages[-1]["content"]
+        if '"risk_score"' in u:
+            return LLMResponse(text=GOOD_CORE)
+        if "Reproducibility checklist" in u or "Checklist rubric" in u:
+            return LLMResponse(text="   \n\n  ")  # empty checklist
+        return LLMResponse(text=_GOOD_MD)  # other md files fine
+
+    rm = run_review("p", root=tmp_path, complete_fn=per_file)
+    assert rm["assessment_status"] == "partial"
+    assert "checklist.md" in rm["notes"]
+    assert "too short" in rm["notes"]
+
+
+def test_md_validation_missing_structural_marker_degrades(tmp_path):
+    """A long-but-marker-free section (e.g. final_review.md sans verdict) degrades."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    # 400 chars of prose with no verdict token, no [PASS]/[FAIL], no heading.
+    bland = "lorem ipsum " * 40
+
+    def per_file(model, messages, tools):
+        u = messages[-1]["content"]
+        if '"risk_score"' in u:
+            return LLMResponse(text=GOOD_CORE)
+        if "Final Review" in u:
+            return LLMResponse(text=bland)  # missing verdict token
+        return LLMResponse(text=_GOOD_MD)
+
+    rm = run_review("p", root=tmp_path, complete_fn=per_file)
+    assert rm["assessment_status"] == "partial"
+    assert "final_review.md" in rm["notes"]
+    assert "missing verdict token" in rm["notes"]
+
+
+def test_md_validation_passes_for_well_formed_md(tmp_path):
+    """All md sections valid -> assessment_status stays complete, no md note."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    rm = run_review("p", root=tmp_path, complete_fn=_backend())
+    assert rm["assessment_status"] == "complete"
+    assert "markdown validation failed" not in rm.get("notes", "")
+
+
+def test_md_validation_preserves_recovery_note(tmp_path, monkeypatch):
+    """If risk_matrix was recovered AND md fails, both notes appear."""
+    from tools.orchestrator import review as review_mod
+
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    malformed = '{"risk_score": 30, "verdict": "REJECT"'  # malformed
+    repaired = {
+        "risk_score": 30, "risk_level": "MEDIUM", "verdict": "REJECT",
+        "issues": {"critical": [], "major": [], "minor": [], "suggestions": []},
+        "required_changes": [],
+    }
+    monkeypatch.setattr(review_mod, "_repair_json_deterministic", lambda text: repaired)
+
+    def per_file(model, messages, tools):
+        u = messages[-1]["content"]
+        if '"risk_score"' in u:
+            return LLMResponse(text=malformed)
+        return LLMResponse(text="too short")  # all md fail validation
+
+    rm = run_review("p", root=tmp_path, complete_fn=per_file)
+    # md failed -> partial. Recovery note + md note both present.
+    assert rm["assessment_status"] == "partial"
+    assert "recovered from malformed JSON" in rm["notes"]
+    assert "markdown validation failed" in rm["notes"]
+    assert rm["raw_model_output"] == malformed
 
 
 def test_paper_title_copied_from_kbe_null(tmp_path):

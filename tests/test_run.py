@@ -84,8 +84,20 @@ def _fake_backend(model, messages, tools):
             )
         )
 
-    # Review markdown sections.
-    return LLMResponse(text="# Report\n\nFake synthesis body.\n")
+    # Review markdown sections. Satisfies the per-section validators added in
+    # patch 0036 (>= _MIN_MD_CHARS, plus a heading + verdict token + [PASS]
+    # token to clear all three structural-marker checks at once).
+    return LLMResponse(
+        text=(
+            "# Report\n\n"
+            "Verdict: **MINOR REVISION**\n\n"
+            "## Checklist\n"
+            "- [x] **[PASS]** bj-01-readme — README present.\n\n"
+            "This fake synthesis body exists only to clear the minimum-length "
+            "threshold and carry each markdown file's structural marker so the "
+            "end-to-end test reflects a well-formed pipeline run.\n"
+        )
+    )
 
 
 def _fake_extract(_pdf_path):

@@ -59,6 +59,58 @@ _MD_OUTPUTS: dict[str, str] = {
     "organised by severity, each cited by evidence path",
 }
 
+# Minimum substantive length per markdown section, in characters of stripped text.
+# Calibrated to catch empty/whitespace and one-line responses without rejecting
+# legitimately short audits of small supplements.
+_MIN_MD_CHARS = 200
+
+
+def _has_verdict_token(text: str) -> bool:
+    return any(v in text for v in _VERDICTS)
+
+
+def _has_checklist_token(text: str) -> bool:
+    return any(tok in text for tok in ("[PASS]", "[FAIL]", "[UNVERIFIED]"))
+
+
+def _has_heading(text: str) -> bool:
+    return any(line.lstrip().startswith("#") for line in text.splitlines())
+
+
+# Structural marker per markdown file: (predicate, message-if-missing). A section
+# is valid iff its stripped length >= _MIN_MD_CHARS AND its predicate passes.
+_MD_VALIDATORS: dict[str, tuple[Any, str]] = {
+    "final_review.md": (
+        _has_verdict_token,
+        "missing verdict token (ACCEPT|MINOR REVISION|MAJOR REVISION|REJECT)",
+    ),
+    "checklist.md": (
+        _has_checklist_token,
+        "missing [PASS]/[FAIL]/[UNVERIFIED] token",
+    ),
+    "exhaustive_audit_report.md": (
+        _has_heading,
+        "missing markdown heading",
+    ),
+}
+
+
+def _validate_md_section(name: str, text: str | None) -> str | None:
+    """Return failure reason or None.
+
+    Catches the two failure modes a per-section model call can produce silently:
+    empty/whitespace output (length below ``_MIN_MD_CHARS``) and structurally
+    malformed output (the expected per-file marker absent). Either turns a
+    nominally successful assessment into ``partial`` in the caller.
+    """
+    stripped = (text or "").strip()
+    if len(stripped) < _MIN_MD_CHARS:
+        return f"too short ({len(stripped)} chars; need >= {_MIN_MD_CHARS})"
+    predicate, missing_msg = _MD_VALIDATORS.get(name, (None, ""))
+    if predicate is not None and not predicate(text or ""):
+        return missing_msg
+    return None
+
 
 def _load_upstream(path: Path) -> tuple[dict[str, Any] | None, str]:
     """Return (parsed dict or None, status string) for an upstream output."""
@@ -413,6 +465,25 @@ def run_review(
                 f"# {filename}\n\n_Generation failed: {exc}._\n\n"
                 "See risk_matrix.json for the verdict.\n"
             )
+
+    # Per-section validation: empty/whitespace or structurally malformed output
+    # used to write silently as success (file size >= 2 bytes passes the shell
+    # validator). Catch it here, degrade to ``partial`` and surface which
+    # section(s) failed in ``notes``; do NOT overwrite the file content (the
+    # original placeholder or model text is more diagnostic than a generic stub).
+    md_failures = [
+        (name, reason)
+        for name, text in md_files.items()
+        if (reason := _validate_md_section(name, text)) is not None
+    ]
+    if md_failures:
+        if rm["assessment_status"] == "complete":
+            rm["assessment_status"] = "partial"
+        failure_list = "; ".join(f"{n}: {r}" for n, r in md_failures)
+        md_note = f"[markdown validation failed for: {failure_list}]"
+        existing = rm.get("notes", "")
+        rm["notes"] = f"{existing}\n{md_note}".strip() if existing else md_note
+
     _write_review(review_dir, rm, md_files)
     return rm
 
