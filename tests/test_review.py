@@ -282,8 +282,9 @@ def test_er_present_included_unstripped():
 
 def test_rubric_contains_all_24_item_ids():
     """_load_checklist_rubric must include all 24 item IDs from checklist.yaml."""
-    import yaml
     from pathlib import Path as _Path
+
+    import yaml
 
     with open(_Path(__file__).parent.parent / "checklist.yaml") as f:
         data = yaml.safe_load(f)
@@ -315,8 +316,9 @@ def test_checklist_prompt_contains_rubric_and_template():
 
 def test_checklist_prompt_contains_all_24_ids():
     """Every item ID from checklist.yaml must appear in the checklist prompt."""
-    import yaml
     from pathlib import Path as _Path
+
+    import yaml
 
     with open(_Path(__file__).parent.parent / "checklist.yaml") as f:
         data = yaml.safe_load(f)
