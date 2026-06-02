@@ -164,6 +164,17 @@ def test_log_and_notes_written(tmp_path):
     assert (tmp_path / "ai4r" / "logged" / "kbe" / "notes.md").is_file()
 
 
+def test_section_prompt_tags_paper_text_as_untrusted():
+    """Prompt-injection hardening: paper text fenced and tagged untrusted."""
+    from tools.orchestrator.kbe import _section_prompt
+
+    prompt = _section_prompt("paper_title", "the title", "MALICIOUS BODY")
+    assert "SECURITY" in prompt
+    assert "untrusted" in prompt
+    assert "<paper_text>" in prompt and "</paper_text>" in prompt
+    assert "MALICIOUS BODY" in prompt  # text still embedded, just fenced
+
+
 def test_default_extract_chains_string_returning_tools(monkeypatch):
     """Regression: the registered pdf2text/clean_pdf_text return STRINGS (and
     raise on failure), not dicts. _default_extract must chain them as such."""

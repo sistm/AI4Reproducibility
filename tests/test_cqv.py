@@ -142,3 +142,15 @@ def test_fences_tolerated_and_log_written(tmp_path):
     run_cqv("fenced", root=tmp_path, complete_fn=_fake_returning(fenced))
     log = (tmp_path / "ai4r" / "fenced" / "logs" / "workflow.log").read_text()
     assert "CQV status=success" in log
+
+
+def test_user_prompt_tags_file_contents_as_untrusted():
+    """Prompt-injection hardening: tool-read file contents flagged untrusted."""
+    from pathlib import Path as _Path
+
+    from tools.orchestrator.cqv import _user_prompt
+
+    prompt = _user_prompt(_Path("/tmp/assets"), "title")
+    assert "SECURITY" in prompt
+    assert "untrusted" in prompt
+    assert "read_file" in prompt  # the specific tool whose returns are tainted

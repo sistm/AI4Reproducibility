@@ -515,3 +515,18 @@ def test_run_review_routes_checklist_to_checklist_prompt(tmp_path):
         assert "bj-01-readme" not in seen["other"], (
             "Rubric leaked into a non-checklist markdown prompt"
         )
+
+
+def test_review_prompts_tag_upstream_as_untrusted():
+    """Prompt-injection hardening: all three Review prompts fence upstream JSON."""
+    from tools.orchestrator.review import _checklist_prompt, _md_prompt, _risk_prompt
+
+    ctx = '{"paper": "T"}'
+    for prompt in (
+        _risk_prompt(ctx, "complete"),
+        _checklist_prompt(ctx, "complete"),
+        _md_prompt("a final review", ctx, "complete"),
+    ):
+        assert "SECURITY" in prompt
+        assert "untrusted" in prompt
+        assert "<upstream_outputs" in prompt and "</upstream_outputs>" in prompt
