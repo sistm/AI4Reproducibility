@@ -144,13 +144,13 @@ Structured outputs following the workflow specification:
 
 ## File References
 
-- Review template: `assets/review-template.md`
-- QA checklist: `references/checklist.md`
-- Static analysis rules: `references/static-analysis.md`
-- Performance review: `references/performance-review.md`
-- Statistical validation: `references/statistical-validation.md`
-- Reproducibility: `references/reproducibility.md`
-- Security review: `references/security-review.md`
+- Review template: `assets/REVIEW_TEMPLATE.md`
+- QA checklist: `references/CHECKLIST.md`
+- Static analysis rules: `references/STATIC_ANALYSIS.md`
+- Performance review: `references/PERFORMANCE_REVIEW.md`
+- Statistical validation: `references/STATISTICAL_VALIDATION.md`
+- Reproducibility: `references/REPRODUCIBILITY.md`
+- Security review: `references/SECURITY_REVIEW.md`
 
 ---
 
