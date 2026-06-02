@@ -39,3 +39,40 @@ jobs:
  
       - name: Test suite
         run: pytest --tb=short
+
+  # Re-runs the test suite with the optional [pdf] and [orchestrator] extras
+  # ABSENT, to enforce that optional deps stay optional. Anything that hard-
+  # imports pdfminer / json_repair / litellm at module top — instead of going
+  # through pytest.importorskip or a lazy import — fails here and not in the
+  # main job. Previously this invariant was enforced only by a local
+  # sitecustomize blocker that contributors had to set up manually, which
+  # silently no-op'd on Python 3.12+ (legacy find_module API). CI itself is
+  # the source of truth now.
+  test-minimal-deps:
+    name: Tests without optional extras
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies (dev only — no [pdf], no [orchestrator])
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Verify optional deps are actually absent
+        run: |
+          python -c "import importlib.util, sys; \
+            missing = [m for m in ('pdfminer','json_repair','litellm') \
+                       if importlib.util.find_spec(m) is None]; \
+            print('missing as expected:', missing); \
+            sys.exit(0 if set(missing) == {'pdfminer','json_repair','litellm'} else 1)"
+
+      - name: Test suite (tests requiring optional deps must skip, not fail)
+        run: pytest --tb=short
