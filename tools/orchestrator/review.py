@@ -34,6 +34,8 @@ from typing import Any
 import yaml
 
 from tools.orchestrator._stage import (
+    _repair_json_deterministic,
+    _repair_json_once,
     append_log,
     is_kebab,
     load_skill,
@@ -351,16 +353,51 @@ def run_review(
 
     try:
         core_raw = _run_call(_risk_prompt(context, assessment_status), model_name, complete_fn)
-        core = _normalise_core(parse_json_object(core_raw))
-    except Exception as exc:  # cannot produce a verdict -> failed, but still write 4 files
+    except Exception as exc:  # LLM transport failure: no synthesis happened, write 4 files
         rm = _assemble(
             review_title, paper_title, "failed", upstream_status, None,
-            "risk_matrix_schema_error", f"risk-matrix synthesis failed: {exc}",
+            "llm_request_failed", f"risk-matrix LLM call failed: {exc}",
         )
         _write_review(review_dir, rm, _failed_md(rm))
         return rm
 
+    # Mirror CQV's parse path (LOGIC.md §6 degrade): strict parse, then
+    # deterministic json_repair, then one model reprompt, then fail+keep raw.
+    repaired_via: str | None = None
+    try:
+        parsed = parse_json_object(core_raw)
+    except (ValueError, json.JSONDecodeError) as exc:
+        parsed = _repair_json_deterministic(core_raw)
+        if parsed is not None:
+            repaired_via = "deterministic"
+        else:
+            parsed = _repair_json_once(
+                core_raw, exc, model=model_name, complete_fn=complete_fn
+            )
+            if parsed is not None:
+                repaired_via = "reprompt"
+        if parsed is None:
+            rm = _assemble(
+                review_title, paper_title, "failed", upstream_status, None,
+                "output_parse_failed",
+                f"risk-matrix JSON parse failed: {exc}",
+            )
+            rm["raw_model_output"] = core_raw  # retain raw for human verification
+            _write_review(review_dir, rm, _failed_md(rm))
+            return rm
+
+    core = _normalise_core(parsed)
     rm = _assemble(review_title, paper_title, assessment_status, upstream_status, core)
+    if repaired_via is not None:
+        # Salvaged core is lower-confidence (repair can guess structure or drop
+        # content); flag it AND retain the raw bytes so Review/a human can verify
+        # nothing material was lost. Never silent.
+        rm["failure_mode"] = "output_recovered_by_repair"
+        rm["notes"] = (
+            f"[risk_matrix recovered from malformed JSON via {repaired_via} repair; "
+            "raw model output retained in raw_model_output for verification]"
+        )
+        rm["raw_model_output"] = core_raw
 
     md_files: dict[str, str] = {}
     for filename, guidance in _MD_OUTPUTS.items():

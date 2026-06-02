@@ -114,8 +114,73 @@ def test_risk_core_transport_failure_is_failed_but_writes_files(tmp_path):
     _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
     rm = run_review("p", root=tmp_path, complete_fn=_raises)
     assert rm["assessment_status"] == "failed"
-    assert rm["failure_mode"] == "risk_matrix_schema_error"
+    assert rm["failure_mode"] == "llm_request_failed"
     assert _files_exist(tmp_path, "p")
+
+
+def test_risk_core_parse_failure_retains_raw(tmp_path, monkeypatch):
+    """Unparseable core AND both repair paths failing -> failed + raw retained."""
+    from tools.orchestrator import review as review_mod
+
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    garbage = "this is not JSON at all {{{"
+    # Disable both repair paths so we hit the final fail+retain branch deterministically.
+    monkeypatch.setattr(review_mod, "_repair_json_deterministic", lambda text: None)
+    monkeypatch.setattr(
+        review_mod, "_repair_json_once",
+        lambda bad_text, error, *, model, complete_fn: None,
+    )
+    rm = run_review("p", root=tmp_path, complete_fn=_backend(core=garbage))
+    assert rm["assessment_status"] == "failed"
+    assert rm["failure_mode"] == "output_parse_failed"
+    assert rm["raw_model_output"] == garbage
+    assert _files_exist(tmp_path, "p")
+    # The retained raw is also serialised to risk_matrix.json on disk.
+    assert _rm(tmp_path, "p")["raw_model_output"] == garbage
+
+
+def test_risk_core_deterministic_repair_recovers(tmp_path, monkeypatch):
+    """A malformed-but-repairable core is salvaged deterministically; raw retained, flagged."""
+    from tools.orchestrator import review as review_mod
+
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    malformed = '{"risk_score": 30, "risk_level": "MEDIUM", "verdict": "MINOR REVISION"'  # missing closing braces
+    repaired = {
+        "risk_score": 30, "risk_level": "MEDIUM", "verdict": "MINOR REVISION",
+        "issues": {"critical": [], "major": [], "minor": [], "suggestions": []},
+        "required_changes": [],
+    }
+    monkeypatch.setattr(review_mod, "_repair_json_deterministic", lambda text: repaired)
+    rm = run_review("p", root=tmp_path, complete_fn=_backend(core=malformed))
+    assert rm["assessment_status"] == "complete"  # recovery is non-fatal
+    assert rm["failure_mode"] == "output_recovered_by_repair"
+    assert rm["verdict"] == "MINOR REVISION"
+    assert rm["raw_model_output"] == malformed
+    assert "deterministic" in rm["notes"]
+
+
+def test_risk_core_reprompt_repair_recovers(tmp_path, monkeypatch):
+    """Deterministic fails, model reprompt repairs; raw retained, flagged."""
+    from tools.orchestrator import review as review_mod
+
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    malformed = '{"risk_score": 40, "verdict": "REJECT" oops'
+    repaired = {
+        "risk_score": 40, "risk_level": "MEDIUM", "verdict": "REJECT",
+        "issues": {"critical": [], "major": [], "minor": [], "suggestions": []},
+        "required_changes": [],
+    }
+    monkeypatch.setattr(review_mod, "_repair_json_deterministic", lambda text: None)
+    monkeypatch.setattr(
+        review_mod, "_repair_json_once",
+        lambda bad_text, error, *, model, complete_fn: repaired,
+    )
+    rm = run_review("p", root=tmp_path, complete_fn=_backend(core=malformed))
+    assert rm["assessment_status"] == "complete"
+    assert rm["failure_mode"] == "output_recovered_by_repair"
+    assert rm["verdict"] == "REJECT"
+    assert rm["raw_model_output"] == malformed
+    assert "reprompt" in rm["notes"]
 
 
 def test_invalid_verdict_is_coerced(tmp_path):
