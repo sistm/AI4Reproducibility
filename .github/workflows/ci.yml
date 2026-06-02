@@ -21,12 +21,13 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      # Install only what the checklist renderer and linter need.
-      # Once pyproject.toml is committed, replace the two lines below with:
-      #   pip install -e ".[dev]"
+      # Install the project itself plus dev/test deps and pdfminer (used by
+      # the small real-PDF test exercising _default_extract). litellm and
+      # json_repair stay out of CI: tests inject a fake backend and the
+      # json_repair salvage paths importorskip when it's absent.
       - name: Install dependencies
         run: |
-          pip install pyyaml jsonschema ruff pytest
+          pip install -e ".[dev,pdf]"
 
       - name: Validate checklists and verify Markdown views are in sync
         run: |

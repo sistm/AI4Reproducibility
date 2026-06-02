@@ -215,6 +215,26 @@ def test_default_extract_propagates_tool_failure(monkeypatch):
         raise AssertionError("expected RuntimeError to propagate")
 
 
+def test_default_extract_on_real_pdf_fixture():
+    """End-to-end check of _default_extract on a tiny committed PDF fixture.
+
+    Skipped when pdfminer.six is absent (CI installs it via the ``[pdf]`` extra;
+    local dev without pdfminer still passes by skipping). Catches the regression
+    where the registered pdf2text/clean_pdf_text wrappers drift away from
+    returning strings — caught only by an actual round-trip, not by mocks.
+    """
+    import pytest
+
+    pytest.importorskip("pdfminer")
+    from tools.orchestrator.kbe import _default_extract
+
+    fixture = Path(__file__).parent / "fixtures" / "tiny.pdf"
+    assert fixture.is_file(), "tiny.pdf fixture missing"
+    extracted = _default_extract(fixture)
+    assert "AI4Reproducibility" in extracted
+    assert "_default_extract" in extracted
+
+
 def _truncating_backend(truncated_field, partial_text, valid):
     def backend(model, messages, tools):
         user = messages[-1]["content"]

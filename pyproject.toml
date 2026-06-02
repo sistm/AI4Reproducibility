@@ -66,6 +66,12 @@ orchestrator = [
     # JSON in the CQV parse path. Absent -> CQV falls back to a model reprompt.
     "json_repair>=0.30",
 ]
+# KBE's _default_extract reads paper text via pdfminer.six. Optional because
+# tests inject a fake extract_fn; declared here so CI and real runs can install
+# it explicitly and tests that exercise _default_extract can importorskip it.
+pdf = [
+    "pdfminer.six>=20231228",
+]
 
 [project.urls]
 Homepage = "https://github.com/sistm/AI4Reproducibility"
