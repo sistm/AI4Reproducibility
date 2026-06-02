@@ -55,6 +55,43 @@ class AgentStepLimit(RuntimeError):
 # finish_reason values that mean the model hit the output-token cap mid-answer.
 _TRUNCATED_REASONS = {"length", "max_tokens", "model_length"}
 
+# HTTP status codes worth retrying: 408 (timeout), 429 (rate-limit) and 5xx are
+# transient; other 4xx (auth, bad request, not found, context-window) will fail
+# the same way on every attempt and only burn quota.
+_TRANSIENT_STATUS = {408, 429, 500, 502, 503, 504}
+
+# Exception class names known to be non-transient across LiteLLM/OpenAI/Anthropic
+# SDKs. Names (not isinstance) so the seam stays free of provider-typing coupling.
+_NON_TRANSIENT_EXC_NAMES = frozenset({
+    "AuthenticationError",
+    "BadRequestError",
+    "ContentPolicyViolationError",
+    "ContextWindowExceededError",
+    "InvalidRequestError",
+    "NotFoundError",
+    "PermissionDeniedError",
+    "UnprocessableEntityError",
+})
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Return True if ``exc`` is worth a retry; False if it would be wasted.
+
+    Inspects an HTTP-style ``status_code`` first (most reliable signal across
+    LiteLLM-mapped providers), then falls back to known exception class names.
+    Unknown exceptions are treated as transient — the loop exists to absorb
+    rare network blips, so the default-retry stance only sheds quota on
+    classified-bad cases (avoiding the "retry an auth failure 5 times" pattern).
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        if status in _TRANSIENT_STATUS:
+            return True
+        if 400 <= status < 500:
+            return False  # auth, bad request, context-window — retry won't help
+        return status >= 500  # other 5xx: still transient
+    return type(exc).__name__ not in _NON_TRANSIENT_EXC_NAMES
+
 
 class OutputTruncated(RuntimeError):
     """Raised when a final model answer was cut off at the token cap.
@@ -93,14 +130,15 @@ def _litellm_complete(
     # path imports ``tenacity``, a transitive dependency that — when absent —
     # crashes the call outright ("No module named 'tenacity'"), silently killing
     # a section. A small self-contained loop keeps retries working with no extra
-    # dependency. (Coarse: retries any error; refine to transient-only if needed.)
+    # dependency. Only transient errors are retried (rate-limit/timeout/5xx);
+    # 4xx classes like auth or bad-request fail-fast — see _is_transient.
     retries = config.num_retries()
     for attempt in range(retries + 1):
         try:
             response = litellm.completion(**kwargs)
             break
-        except Exception:
-            if attempt >= retries:
+        except Exception as exc:
+            if attempt >= retries or not _is_transient(exc):
                 raise
             time.sleep(min(2 ** attempt, 8))
     message = response.choices[0].message

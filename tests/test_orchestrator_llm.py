@@ -246,3 +246,88 @@ def test_run_agent_normal_finish_returns_text():
     llm = FakeLLM([LLMResponse(text="ok", finish_reason="stop")])
     assert run_agent(system="s", user="u", model="m", complete_fn=llm,
                      tool_runner=lambda *a, **k: None) == "ok"
+
+
+# --- _is_transient classifier --------------------------------------------------
+
+
+def test_is_transient_unknown_exception_retried():
+    """Default-retry: an exception we don't recognise is treated as transient."""
+    from tools.orchestrator.llm import _is_transient
+
+    assert _is_transient(RuntimeError("network blip")) is True
+    assert _is_transient(TimeoutError("timed out")) is True
+
+
+def test_is_transient_4xx_status_not_retried():
+    """An exception carrying status_code in 4xx (auth, bad request) fails fast."""
+    from tools.orchestrator.llm import _is_transient
+
+    class FakeAuth(Exception):
+        status_code = 401
+
+    class FakeBad(Exception):
+        status_code = 400
+
+    assert _is_transient(FakeAuth()) is False
+    assert _is_transient(FakeBad()) is False
+
+
+def test_is_transient_429_and_5xx_retried():
+    """Rate-limit (429), timeout (408) and 5xx classify as transient."""
+    from tools.orchestrator.llm import _is_transient
+
+    for code in (408, 429, 500, 502, 503, 504):
+        class E(Exception):
+            pass
+        E.status_code = code
+        assert _is_transient(E()) is True, f"status {code} should be transient"
+
+
+def test_is_transient_classified_by_exception_class_name():
+    """Without status_code, the known non-transient class names fail fast."""
+    from tools.orchestrator.llm import _is_transient
+
+    class AuthenticationError(Exception):
+        pass
+
+    class ContextWindowExceededError(Exception):
+        pass
+
+    class RateLimitError(Exception):  # not in non-transient set
+        pass
+
+    assert _is_transient(AuthenticationError()) is False
+    assert _is_transient(ContextWindowExceededError()) is False
+    assert _is_transient(RateLimitError()) is True  # default-retry
+
+
+def test_litellm_backend_fails_fast_on_non_transient(monkeypatch):
+    """A 401 raises on the first attempt — no retries, no sleeps."""
+    import sys
+    import time as _time
+    import types
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(_time, "sleep", lambda s: sleep_calls.append(s))
+
+    attempts = {"n": 0}
+
+    class AuthError(Exception):
+        status_code = 401
+
+    def always_401(**kw):
+        attempts["n"] += 1
+        raise AuthError("bad key")
+
+    fake = types.ModuleType("litellm")
+    fake.completion = always_401
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "5")  # plenty of retries available
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with pytest.raises(AuthError):
+        _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+    assert attempts["n"] == 1  # no retries on non-transient
+    assert sleep_calls == []  # no backoff sleep
