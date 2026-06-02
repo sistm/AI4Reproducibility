@@ -31,6 +31,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from tools.orchestrator._stage import (
     append_log,
     is_kebab,
@@ -49,24 +51,7 @@ _FAILED_STATUSES = {"failed", "missing", "unreadable", "unknown"}
 _MD_OUTPUTS: dict[str, str] = {
     "final_review.md": "an executive Final Review: overall assessment, the verdict "
     "and its justification, and the key recommended changes",
-    "checklist.md": (
-        "the Biometrical Journal reproducibility checklist for this submission, "
-        "following the format in agents/review/assets/review-template.md EXACTLY. "
-        "Rules: (1) Emit all 24 checklist.yaml items in the order and sections "
-        "shown in the template — Documentation, Completeness, Organisation, "
-        "Reproducibility, Code Quality, Packaging, Result Verification. "
-        "(2) For each item use one of three verdict tokens: PASS (requirement met "
-        "with evidence), FAIL (requirement not met — cite file:line), or UNVERIFIED "
-        "(could not assess — name the upstream cause). "
-        "(3) Render a checked checkbox [x] for PASS, unchecked [ ] for FAIL and "
-        "UNVERIFIED. "
-        "(4) Follow each item's description with a single evidenced audit note "
-        "sentence. "
-        "(5) Append a bold 'Required action:' sub-bullet ONLY on FAIL items. "
-        "(6) Close with the summary table and numbered required-actions list from "
-        "the template. "
-        "(7) Never invent items not in checklist.yaml; never omit items."
-    ),
+    "checklist.md": "the Biometrical Journal reproducibility checklist (built from injected rubric and template — see _checklist_prompt)",
     "exhaustive_audit_report.md": "a detailed audit report: an Inputs section "
     "quoting each upstream status and failure_mode, then the CQV and KBE findings "
     "organised by severity, each cited by evidence path",
@@ -150,6 +135,50 @@ def _risk_prompt(context: str, assessment_status: str) -> str:
         '"major": [], "minor": [], "suggestions": []}, "required_changes": []} — no '
         "prose, no markdown fences. Each issue is an object with id, description and "
         "an evidence file path under ai4r/<review_title>/."
+    )
+
+
+def _load_checklist_rubric() -> str:
+    """Return the 24-item rubric as a numbered plain-text list for prompt injection.
+
+    Each line: ``N. <id> (<severity>): <description>``
+    Loading from checklist.yaml at call time ensures the prompt always reflects
+    the current rubric without a code change.
+    """
+    checklist_path = Path(__file__).parent.parent.parent / "checklist.yaml"
+    data = yaml.safe_load(checklist_path.read_text(encoding="utf-8"))
+    lines = []
+    for i, item in enumerate(data["items"], 1):
+        desc = item["description"].strip().replace("\n", " ")
+        lines.append(f"{i}. {item['id']} ({item['severity']}): {desc}")
+    return "\n".join(lines)
+
+
+def _checklist_prompt(context: str, assessment_status: str) -> str:
+    """Build the checklist.md prompt with rubric and template injected verbatim.
+
+    The model receives the 24 item IDs/descriptions from checklist.yaml and the
+    filled-template skeleton from review-template.md so it anchors to the exact
+    rubric rather than free-generating items.
+    """
+    rubric = _load_checklist_rubric()
+    template = load_skill("review/assets/review-template.md")
+    return (
+        f"Upstream outputs (assessment_status={assessment_status}):\n\n"
+        f"{context}\n\n"
+        "---\n\n"
+        "## Checklist rubric — use these 24 item IDs and descriptions verbatim\n\n"
+        f"{rubric}\n\n"
+        "---\n\n"
+        "## Output template — fill in the tokens; do not restructure\n\n"
+        f"{template}\n\n"
+        "---\n\n"
+        "Fill every [VERDICT] token with exactly one of: PASS, FAIL, UNVERIFIED.\n"
+        "Fill every [AUDIT NOTE] with one sentence citing file:line from the upstream outputs.\n"
+        "Use [x] for PASS, [ ] for FAIL and UNVERIFIED.\n"
+        "Append **Required action:** sub-bullet ONLY on FAIL items.\n"
+        "Never rename, reorder, or omit items.\n"
+        "Output the filled template as GitHub-flavoured Markdown only."
     )
 
 
@@ -336,9 +365,12 @@ def run_review(
     md_files: dict[str, str] = {}
     for filename, guidance in _MD_OUTPUTS.items():
         try:
-            md_files[filename] = _run_call(
-                _md_prompt(guidance, context, assessment_status), model_name, complete_fn
+            prompt = (
+                _checklist_prompt(context, assessment_status)
+                if filename == "checklist.md"
+                else _md_prompt(guidance, context, assessment_status)
             )
+            md_files[filename] = _run_call(prompt, model_name, complete_fn)
         except Exception as exc:  # a markdown miss is degraded, not fatal — placeholder it
             md_files[filename] = (
                 f"# {filename}\n\n_Generation failed: {exc}._\n\n"

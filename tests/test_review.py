@@ -14,7 +14,9 @@ from tools.orchestrator.llm import LLMResponse
 from tools.orchestrator.review import (
     _MD_OUTPUTS,
     _SOURCE_CAP,
+    _checklist_prompt,
     _context_blob,
+    _load_checklist_rubric,
     run_review,
 )
 
@@ -272,3 +274,85 @@ def test_er_present_included_unstripped():
     blob = _context_blob(None, None, er)
     assert "er_output:" in blob
     assert "internal_note" in blob
+
+
+# ---------------------------------------------------------------------------
+# _checklist_prompt and _load_checklist_rubric (patch 0034)
+# ---------------------------------------------------------------------------
+
+def test_rubric_contains_all_24_item_ids():
+    """_load_checklist_rubric must include all 24 item IDs from checklist.yaml."""
+    import yaml
+    from pathlib import Path as _Path
+
+    with open(_Path(__file__).parent.parent / "checklist.yaml") as f:
+        data = yaml.safe_load(f)
+
+    rubric = _load_checklist_rubric()
+    for item in data["items"]:
+        assert item["id"] in rubric, f"item {item['id']!r} missing from rubric"
+
+
+def test_checklist_prompt_contains_rubric_and_template():
+    """_checklist_prompt must embed the rubric and the template skeleton."""
+    context = "kbe_output:\n{}\n\ncqv_output:\n{}"
+    prompt = _checklist_prompt(context, "partial")
+
+    # Rubric items: spot-check first, middle, and last
+    assert "bj-01-readme" in prompt
+    assert "bj-07-no-absolute-paths" in prompt
+    assert "audit-verify-tables-match" in prompt
+
+    # Template structural tokens must be present for the model to fill
+    assert "[VERDICT]" in prompt
+    assert "[AUDIT NOTE]" in prompt
+    assert "Required action" in prompt
+
+    # Upstream context must be present
+    assert "kbe_output:" in prompt
+    assert "assessment_status=partial" in prompt
+
+
+def test_checklist_prompt_contains_all_24_ids():
+    """Every item ID from checklist.yaml must appear in the checklist prompt."""
+    import yaml
+    from pathlib import Path as _Path
+
+    with open(_Path(__file__).parent.parent / "checklist.yaml") as f:
+        data = yaml.safe_load(f)
+
+    prompt = _checklist_prompt("kbe_output:\n{}", "complete")
+    missing = [item["id"] for item in data["items"] if item["id"] not in prompt]
+    assert missing == [], f"Item IDs missing from checklist prompt: {missing}"
+
+
+def test_run_review_routes_checklist_to_checklist_prompt(tmp_path):
+    """The checklist.md call must receive rubric content; others must not."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+
+    seen: dict[str, str] = {}
+
+    def capturing_backend(model, messages, tools):
+        u = messages[-1]["content"]
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        # Identify which markdown call this is by unique content
+        if "bj-01-readme" in u:
+            seen["checklist"] = u
+        else:
+            seen.setdefault("other", u)
+        return LLMResponse(text="# doc\n")
+
+    run_review("p", root=tmp_path, complete_fn=capturing_backend)
+
+    # Checklist prompt must have received the rubric
+    assert "checklist" in seen, "No checklist prompt was captured"
+    assert "bj-07-no-absolute-paths" in seen["checklist"]
+    assert "audit-verify-tables-match" in seen["checklist"]
+    assert "[VERDICT]" in seen["checklist"]
+
+    # Other markdown prompts must NOT contain rubric IDs
+    if "other" in seen:
+        assert "bj-01-readme" not in seen["other"], (
+            "Rubric leaked into a non-checklist markdown prompt"
+        )
