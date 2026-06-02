@@ -49,9 +49,24 @@ _FAILED_STATUSES = {"failed", "missing", "unreadable", "unknown"}
 _MD_OUTPUTS: dict[str, str] = {
     "final_review.md": "an executive Final Review: overall assessment, the verdict "
     "and its justification, and the key recommended changes",
-    "checklist.md": "the Biometrical Journal reproducibility checklist, each item "
-    "marked Pass / Fail / Unverified with a one-line reason; every Unverified item "
-    "must cite the upstream failure that caused it",
+    "checklist.md": (
+        "the Biometrical Journal reproducibility checklist for this submission, "
+        "following the format in agents/review/assets/review-template.md EXACTLY. "
+        "Rules: (1) Emit all 24 checklist.yaml items in the order and sections "
+        "shown in the template — Documentation, Completeness, Organisation, "
+        "Reproducibility, Code Quality, Packaging, Result Verification. "
+        "(2) For each item use one of three verdict tokens: PASS (requirement met "
+        "with evidence), FAIL (requirement not met — cite file:line), or UNVERIFIED "
+        "(could not assess — name the upstream cause). "
+        "(3) Render a checked checkbox [x] for PASS, unchecked [ ] for FAIL and "
+        "UNVERIFIED. "
+        "(4) Follow each item's description with a single evidenced audit note "
+        "sentence. "
+        "(5) Append a bold 'Required action:' sub-bullet ONLY on FAIL items. "
+        "(6) Close with the summary table and numbered required-actions list from "
+        "the template. "
+        "(7) Never invent items not in checklist.yaml; never omit items."
+    ),
     "exhaustive_audit_report.md": "a detailed audit report: an Inputs section "
     "quoting each upstream status and failure_mode, then the CQV and KBE findings "
     "organised by severity, each cited by evidence path",
