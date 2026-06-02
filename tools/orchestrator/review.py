@@ -28,6 +28,7 @@ SKILL load, workflow-log append) now lives in :mod:`tools.orchestrator._stage`.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +111,34 @@ def _validate_md_section(name: str, text: str | None) -> str | None:
     if predicate is not None and not predicate(text or ""):
         return missing_msg
     return None
+
+
+# Matches a response whose ENTIRE content is one outer ``` fence, optionally
+# tagged ```markdown/```md, with anything (incl. inner ```r ... ``` blocks) in
+# between. Greedy ``.*`` plus the literal trailing ``\n```\s*$`` anchors the
+# closing fence at the very end, so we never strip a fence that just happens
+# to start at line 1 but doesn't wrap the whole document. ``~~~`` fences are
+# rare in model output and intentionally not handled — observed failure mode
+# is exclusively backticks.
+_OUTER_FENCE_RE = re.compile(
+    r"\A\s*```(?:markdown|md)?\s*\n(.*?)\n```\s*\Z",
+    re.DOTALL,
+)
+
+
+def _strip_outer_md_fence(text: str) -> str:
+    """Unwrap a response that put the whole document inside a ``` fence.
+
+    Observed in real Mistral output: prompts saying "output as Markdown" elicit
+    a single ``\u0060\u0060\u0060markdown ... \u0060\u0060\u0060`` block that renders on GitHub as raw source,
+    not as a formatted document. This unwraps only when the fence covers the
+    entire stripped content; documents that legitimately *contain* fenced code
+    blocks but don't start/end with one are untouched.
+    """
+    if not text:
+        return text
+    match = _OUTER_FENCE_RE.match(text)
+    return match.group(1) if match else text
 
 
 def _load_upstream(path: Path) -> tuple[dict[str, Any] | None, str]:
@@ -251,7 +280,9 @@ def _checklist_prompt(context: str, assessment_status: str) -> str:
         "Use [x] for PASS, [ ] for FAIL and UNVERIFIED.\n"
         "Append **Required action:** sub-bullet ONLY on FAIL items.\n"
         "Never rename, reorder, or omit items.\n"
-        "Output the filled template as GitHub-flavoured Markdown only."
+        "Output the filled template as GitHub-flavoured Markdown only. Do NOT "
+        "wrap the response in a ```markdown ... ``` fence — the output IS the "
+        "checklist, not a code block containing one."
     )
 
 
@@ -264,7 +295,10 @@ def _md_prompt(guidance: str, context: str, assessment_status: str) -> str:
         f"Write {guidance}.\n"
         "Return the document as GitHub-flavoured Markdown only. Cite evidence by "
         "file path under ai4r/<review_title>/, and never invent results the "
-        "upstream outputs do not contain."
+        "upstream outputs do not contain. Do NOT wrap the response in a "
+        "```markdown ... ``` fence — the output IS the document, not a code "
+        "block containing one. Inner ```r / ```python fences for code samples "
+        "are fine."
     )
 
 
@@ -481,7 +515,13 @@ def run_review(
                 if filename == "checklist.md"
                 else _md_prompt(guidance, context, assessment_status)
             )
-            md_files[filename] = _run_call(prompt, model_name, complete_fn)
+            # Strip an outer ```markdown fence if the model wrapped the whole
+            # document in one (observed failure mode — see _strip_outer_md_fence).
+            # Runs BEFORE validation so a fence-only short response is still
+            # caught by the min-length check.
+            md_files[filename] = _strip_outer_md_fence(
+                _run_call(prompt, model_name, complete_fn)
+            )
         except Exception as exc:  # a markdown miss is degraded, not fatal — placeholder it
             md_files[filename] = (
                 f"# {filename}\n\n_Generation failed: {exc}._\n\n"

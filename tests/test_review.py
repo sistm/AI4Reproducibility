@@ -530,3 +530,99 @@ def test_review_prompts_tag_upstream_as_untrusted():
         assert "SECURITY" in prompt
         assert "untrusted" in prompt
         assert "<upstream_outputs" in prompt and "</upstream_outputs>" in prompt
+
+
+# --- Outer code-fence stripping (patch 0043) ----------------------------------
+
+
+def test_strip_outer_md_fence_unwraps_markdown_tagged_fence():
+    from tools.orchestrator.review import _strip_outer_md_fence
+
+    wrapped = "```markdown\n# Title\n\nBody paragraph.\n```"
+    assert _strip_outer_md_fence(wrapped) == "# Title\n\nBody paragraph."
+
+
+def test_strip_outer_md_fence_unwraps_bare_fence():
+    from tools.orchestrator.review import _strip_outer_md_fence
+
+    wrapped = "```\n# Title\n\nBody.\n```"
+    assert _strip_outer_md_fence(wrapped) == "# Title\n\nBody."
+
+
+def test_strip_outer_md_fence_preserves_inner_code_blocks():
+    """A document with nested ```r ... ``` blocks must keep them intact."""
+    from tools.orchestrator.review import _strip_outer_md_fence
+
+    wrapped = (
+        "```markdown\n"
+        "# Audit\n\n"
+        "Run this:\n\n"
+        "```r\n"
+        "set.seed(1)\n"
+        "x <- rnorm(10)\n"
+        "```\n\n"
+        "And review the output.\n"
+        "```"
+    )
+    out = _strip_outer_md_fence(wrapped)
+    assert out.startswith("# Audit")
+    assert "```r\nset.seed(1)" in out
+    assert out.endswith("And review the output.")
+
+
+def test_strip_outer_md_fence_no_fence_is_noop():
+    from tools.orchestrator.review import _strip_outer_md_fence
+
+    plain = "# Already clean\n\nBody.\n"
+    assert _strip_outer_md_fence(plain) == plain
+
+
+def test_strip_outer_md_fence_unclosed_fence_is_noop():
+    """A fence that opens but never closes is corrupted output; leave it alone."""
+    from tools.orchestrator.review import _strip_outer_md_fence
+
+    broken = "```markdown\n# Title\n\nNo closing fence here.\n"
+    assert _strip_outer_md_fence(broken) == broken
+
+
+def test_strip_outer_md_fence_empty_and_none_safe():
+    from tools.orchestrator.review import _strip_outer_md_fence
+
+    assert _strip_outer_md_fence("") == ""
+    assert _strip_outer_md_fence(None) is None
+
+
+def test_run_review_strips_outer_fence_from_model_output(tmp_path):
+    """End-to-end: a model that fence-wraps its markdown -> file on disk is unwrapped."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+
+    # 200+ char body so it clears _MIN_MD_CHARS after unwrapping. Includes the
+    # three structural markers (heading, verdict token, [PASS]) so all three
+    # md files pass validation.
+    body = (
+        "# Review report\n\n"
+        "Verdict: **MINOR REVISION**\n\n"
+        "## Checklist\n"
+        "- [x] **[PASS]** bj-01-readme — README present.\n\n"
+        "Padding paragraph that exists solely to clear the minimum-length "
+        "threshold while still carrying every structural marker the per-file "
+        "validators look for in real review output.\n"
+    )
+    wrapped = f"```markdown\n{body}```"
+
+    rm = run_review("p", root=tmp_path, complete_fn=_backend(md=wrapped))
+    assert rm["assessment_status"] == "complete"
+    fr = (tmp_path / "ai4r" / "p" / "review" / "final_review.md").read_text()
+    assert not fr.lstrip().startswith("```"), "outer fence was not stripped"
+    assert "# Review report" in fr
+
+
+def test_md_prompt_includes_anti_fence_instruction():
+    """Prompt-level belt: tell the model not to wrap in the first place."""
+    from tools.orchestrator.review import _checklist_prompt, _md_prompt
+
+    md = _md_prompt("a final review", "{}", "complete")
+    cl = _checklist_prompt("{}", "complete")
+    for p in (md, cl):
+        assert "Do NOT wrap" in p
+        assert "```markdown" in p  # explicitly names the fence to avoid
