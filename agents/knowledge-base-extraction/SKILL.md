@@ -227,6 +227,7 @@ of these values:
 | `pdf_unreadable`       | `pdf2text` returns `success: false` or empty text.                    | `failed`          |
 | `pdf_encrypted`        | `pdf2text` raises a password / encryption error.                      | `failed`          |
 | `text_too_short`       | Cleaned text < 1000 characters (likely a scan or wrong file).         | `failed`          |
+| `llm_request_failed`   | The model call raised (network, auth, 5xx) for every section.         | `failed`          |
 | `domain_unrecognized`  | No biostat/ML/NLP template matches; falls back to generic extraction. | `partial`         |
 | `template_partial`     | Some template sections extracted, others left empty.                  | `partial`         |
 | `parse_error`          | An internal extraction step crashed.                                  | `partial`         |

@@ -177,7 +177,9 @@ The original four values plus one sentinel for the failure case:
 | `failure_mode`              | Trigger                                                                  |
 |-----------------------------|---------------------------------------------------------------------------|
 | `all_upstream_failed`       | KBE and CQV both have `status: "failed"` and ER is skipped/failed.        |
-| `risk_matrix_schema_error`  | Agent built a risk matrix but failed internal schema validation.          |
+| `llm_request_failed`        | The risk-matrix model call raised (network, auth, 5xx).                   |
+| `output_parse_failed`       | Risk-matrix JSON could not be parsed and both repair paths failed; raw retained in `raw_model_output`. |
+| `output_recovered_by_repair`| Risk-matrix JSON was salvaged via `json_repair` or a single reprompt; raw retained for verification (does **not** force `assessment_status: failed`). |
 | `template_render_error`     | One of the markdown templates failed to render with available evidence.   |
 | `parse_error`               | Reading an upstream JSON raised an error.                                 |
 

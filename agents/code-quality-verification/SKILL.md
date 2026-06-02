@@ -179,6 +179,9 @@ of these values:
 | `assets_directory_empty`     | `input/assets/` contains no files after preflight extraction.       | `failed`          |
 | `archive_extraction_failed`  | The `extract_zip` tool reported failure during preflight.           | `failed`          |
 | `language_unrecognized`      | No detectable R / Python / Stata / Julia source files present.      | `failed`          |
+| `llm_request_failed`         | The model call raised (network, auth, 5xx). No audit was produced.  | `failed`          |
+| `output_parse_failed`        | Model output was not valid JSON and both repair paths failed; raw is retained in `raw_model_output`. | `partial` |
+| `output_recovered_by_repair` | Model output was salvaged via `json_repair` or a single reprompt; raw is retained for verification. | `success` |
 | `dependency_parse_failed`    | `get_dependencies` crashed for the detected language.               | `partial`         |
 | `static_check_partial`       | Some checks in `references/CHECKLIST.md` ran, others raised.        | `partial`         |
 | `repo_too_large`             | Repository exceeds an agent-defined inspection budget.              | `partial`         |
