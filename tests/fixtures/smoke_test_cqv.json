@@ -1,0 +1,116 @@
+{
+  "status": "partial",
+  "paper_id": "mock-paper",
+  "failure_mode": "output_recovered_by_repair",
+  "repository_audit": {
+    "code_issues": [
+      {
+        "id": "absolute-path-001",
+        "severity": "HIGH",
+        "description": "Use of absolute paths reduces portability.",
+        "evidence": [
+          {"file": "code/main.R", "line": 10, "snippet": "root <- \"/home/user/project\""},
+          {"file": "code/analysis.R", "line": 5, "snippet": "setwd(\"/home/user/project/data\")"}
+        ]
+      }
+    ],
+    "checks_passed": [
+      "check_no_unsafe_deserialization",
+      "check_no_eval_parse",
+      "check_no_auto_install",
+      "check_no_workspace_clear",
+      "check_no_hardcoded_secrets",
+      "check_no_attach"
+    ]
+  },
+  "code_method_alignment": {
+    "alignment_summary": "Code aligns with stated statistical methods.",
+    "reproducibility": [
+      {
+        "id": "bj-10-set-seed",
+        "severity": "HIGH",
+        "description": "set.seed() not used for all stochastic operations.",
+        "evidence": [{"file": "code/main.R", "line": 42}]
+      }
+    ]
+  },
+  "reproducibility_blockers": [
+    {
+      "id": "BLOCKER-0",
+      "severity": "CRITICAL",
+      "description": "Absolute paths and setwd() calls reduce portability.",
+      "evidence": "code/main.R:10"
+    },
+    {
+      "id": "BLOCKER-1",
+      "severity": "HIGH",
+      "description": "No dependency manifest found.",
+      "evidence": "repository root"
+    }
+  ],
+  "statistical_validity": [
+    {
+      "item_id": "cqv-stat-test-assumptions",
+      "tool_id": "judge_test_assumptions",
+      "severity": "major",
+      "verdict": "not_applicable",
+      "confidence": "high",
+      "rationale": "Code processes precomputed p-values; assumption checks not applicable.",
+      "evidence_refs": ["code/main.R:1-20"]
+    },
+    {
+      "item_id": "cqv-stat-multiple-testing",
+      "tool_id": "judge_multiple_testing_correction",
+      "severity": "major",
+      "verdict": "fail",
+      "confidence": "high",
+      "rationale": "Code imports 1000 p-values but does not apply any correction before thresholding.",
+      "evidence_refs": ["code/analysis.R:2", "code/analysis.R:27-49"]
+    },
+    {
+      "item_id": "cqv-stat-no-data-leakage",
+      "tool_id": "judge_data_leakage",
+      "severity": "critical",
+      "verdict": "not_applicable",
+      "confidence": "high",
+      "rationale": "No relevant evidence found for this check.",
+      "evidence_refs": []
+    },
+    {
+      "item_id": "cqv-stat-ci-coverage",
+      "tool_id": "judge_ci_construction",
+      "severity": "major",
+      "verdict": "unverified",
+      "confidence": "high",
+      "rationale": "Posterior summaries computed but no CI construction method identified.",
+      "evidence_refs": ["code/figures.R:50-60"]
+    },
+    {
+      "item_id": "cqv-stat-representative-sampling",
+      "tool_id": "judge_sampling_representativeness",
+      "severity": "major",
+      "verdict": "pass",
+      "confidence": "high",
+      "rationale": "Code applies survey weights consistently in all hypothesis tests.",
+      "evidence_refs": ["code/analysis.R:15-30"]
+    },
+    {
+      "item_id": "cqv-stat-no-post-hoc",
+      "tool_id": "judge_no_post_hoc_adjustment",
+      "severity": "major",
+      "verdict": "unverified",
+      "confidence": "high",
+      "rationale": "No pre-registered analysis plan available to compare against.",
+      "evidence_refs": ["code/main.R:2-8"]
+    },
+    {
+      "item_id": "cqv-stat-model-diagnostics",
+      "tool_id": "judge_model_diagnostics",
+      "severity": "minor",
+      "verdict": "not_applicable",
+      "confidence": "high",
+      "rationale": "Gibbs sampler for scalar parameter; standard regression diagnostics not applicable.",
+      "evidence_refs": ["code/figures.R:80-95"]
+    }
+  ]
+}

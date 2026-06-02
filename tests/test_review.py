@@ -215,20 +215,12 @@ def test_cqv_bookkeeping_fields_stripped():
     assert "repository_audit" in blob
 
 
-def test_all_stat_judges_visible_after_strip(tmp_path):
+def test_all_stat_judges_visible_after_strip():
     """All 7 stat-validity judges from the smoke-test CQV must be visible."""
     import json as _json
 
-    cqv = _json.loads(
-        (Path(__file__).parent.parent /
-         "ai4r" / "smoke-test" / "cqv" / "cqv_output.json").read_text()
-    ) if (
-        Path(__file__).parent.parent /
-        "ai4r" / "smoke-test" / "cqv" / "cqv_output.json"
-    ).is_file() else _json.loads(
-        # fallback: use the uploaded fixture if the smoke-test dir isn't present
-        open("/mnt/user-data/uploads/cqv_output.json").read()
-    )
+    fixture = Path(__file__).parent / "fixtures" / "smoke_test_cqv.json"
+    cqv = _json.loads(fixture.read_text())
 
     blob = _context_blob(None, cqv, None)
     expected_judges = [
@@ -255,12 +247,9 @@ def test_source_cap_is_not_triggered_on_real_outputs():
     """Real smoke-test KBE and CQV must fit within _SOURCE_CAP after stripping."""
     import json as _json
 
-    try:
-        kbe = _json.loads(open("/mnt/user-data/uploads/kbe_output.json").read())
-        cqv = _json.loads(open("/mnt/user-data/uploads/cqv_output.json").read())
-    except FileNotFoundError:
-        import pytest
-        pytest.skip("smoke-test fixtures not available in this environment")
+    fixtures = Path(__file__).parent / "fixtures"
+    kbe = _json.loads((fixtures / "smoke_test_kbe.json").read_text())
+    cqv = _json.loads((fixtures / "smoke_test_cqv.json").read_text())
 
     blob = _context_blob(kbe, cqv, None)
     assert "[truncated]" not in blob, (

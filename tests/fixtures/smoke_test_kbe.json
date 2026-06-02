@@ -1,0 +1,76 @@
+{
+  "paper_id": "mock-paper",
+  "paper_title": "A Mock Paper Title for Testing",
+  "status": "success",
+  "structured_knowledge": [
+    {
+      "type": "method",
+      "domain": "statistics",
+      "content": "Mock method A uses a nonparametric prior to quantify uncertainty in procedure selection.",
+      "source": "Abstract",
+      "confidence": "high",
+      "reproducibility_impact": "high"
+    },
+    {
+      "type": "dataset",
+      "domain": "statistics",
+      "content": "Mock dataset contains 1000 p-values from hypothesis tests on 50 variables.",
+      "source": "Section 3",
+      "confidence": "high",
+      "reproducibility_impact": "high"
+    },
+    {
+      "type": "result",
+      "domain": "statistics",
+      "content": "Mock method declares on average 850 of 1000 p-values significant at alpha=0.05.",
+      "source": "Section 4",
+      "confidence": "high",
+      "reproducibility_impact": "high"
+    },
+    {
+      "type": "assumption",
+      "domain": "statistics",
+      "content": "Each p-value is assumed super-uniform under the null hypothesis.",
+      "source": "Section 2",
+      "confidence": "high",
+      "reproducibility_impact": "critical"
+    }
+  ],
+  "identified_assumptions": [
+    {
+      "assumption": "P-values are super-uniform under null hypotheses.",
+      "category": "distributional",
+      "risk": "high"
+    },
+    {
+      "assumption": "The prior supports the full space of valid multiple-testing procedures.",
+      "category": "structural",
+      "risk": "medium"
+    },
+    {
+      "assumption": "Survey weights correctly represent the target population.",
+      "category": "data",
+      "risk": "high"
+    }
+  ],
+  "statistical_methods": [
+    "Mock method A uses a nonparametric prior distribution to model uncertainty.",
+    "Monte Carlo sampling approximates the prior predictive distribution.",
+    "Survey weights are applied to hypothesis tests for population-representative inference."
+  ],
+  "data_generation_processes": [
+    {
+      "description": "Mock dataset collected via stratified sampling of study participants.",
+      "sampling": "Two-stage stratified sampling with probability-proportional selection.",
+      "weights": "Participant weights adjust for non-response and over-sampling.",
+      "variables": "50 variables including background, outcomes, and covariates.",
+      "p_value_generation": "1000 nonparametric hypothesis tests on variable pairs."
+    }
+  ],
+  "reproducibility_gaps": [
+    "No random seed is specified in the provided code.",
+    "No software version information is documented.",
+    "Dataset download URL is not provided beyond a general link.",
+    "No convergence diagnostics are reported for the MCMC sampler."
+  ]
+}
