@@ -544,3 +544,45 @@ def test_run_critique_filters_critic_refs_end_to_end(tmp_path):
     concern = out["concerns"][0]
     assert concern["evidence_refs"] == ["ai4r/p/kbe/kbe_output.json"]
     assert concern["ref_audit"]["dropped"][0]["ref"] == "ai4r/p/cqv/nonexistent.md"
+
+
+# --- Rubric content (patch 0052) ----------------------------------------------
+#
+# Lock the rubric refinements so a future SKILL refactor doesn't accidentally
+# drop them. These don't test model behaviour — they test that the rubric
+# fed to the model contains the corrective language the smoke run showed
+# was needed.
+
+
+def test_categories_rubric_specifies_all_four_severities_for_missing_signal():
+    """Rubric must remind the Critic to check major/minor/suggestions, not just critical."""
+    import re
+
+    from tools.orchestrator._stage import load_skill
+
+    rubric = load_skill("critique/references/CATEGORIES.md")
+    # The smoke run flagged 6 missing_upstream_signal concerns for items the
+    # draft HAD surfaced in issues.major. The rubric now mandates a
+    # severity-bucket sweep before firing.
+    assert "issues.major" in rubric
+    assert "issues.minor" in rubric
+    assert "issues.suggestions" in rubric
+    # Use whitespace-tolerant match so the phrase can wrap across lines.
+    assert re.search(r"Check every\s+severity bucket", rubric)
+
+
+def test_categories_rubric_treats_synthesis_as_not_omission():
+    """Compression of multiple upstream items into one issue is not a concern."""
+    from tools.orchestrator._stage import load_skill
+
+    rubric = load_skill("critique/references/CATEGORIES.md")
+    assert "synthesis, not omission" in rubric
+
+
+def test_categories_rubric_checks_required_changes_and_prose():
+    """An R-row or markdown mention counts as addressing the upstream item."""
+    from tools.orchestrator._stage import load_skill
+
+    rubric = load_skill("critique/references/CATEGORIES.md")
+    assert "required_changes" in rubric
+    assert "markdown narrative" in rubric or "markdown prose" in rubric

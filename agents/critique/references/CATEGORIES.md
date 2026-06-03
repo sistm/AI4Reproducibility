@@ -124,27 +124,57 @@ The draft's own fields contradict each other, independent of upstream.
 ## 5. `missing_upstream_signal`
 
 Upstream flagged something material that the draft does not mention at all
-— not as a critical, not as a minor, not in the prose anywhere.
+— not as a critical, not as a major, not as a minor, not as a suggestion,
+not in the markdown prose anywhere.
 
 ### VALID concerns
 
 - KBE's `reproducibility_gaps` array contains "no software versions
   recorded"; the draft has no issue or recommendation about software
-  versioning.
+  versioning, AND the markdown prose does not mention it.
 - CQV's `statistical_validity` section contains a `fail` verdict on
-  multiple-testing correction; the draft's `issues` blocks make no
-  reference to multiple testing.
+  multiple-testing correction; the draft's `issues` blocks (any severity)
+  make no reference to multiple testing, AND `required_changes` does not
+  address it.
 - CQV reports `dependency_validation.status: "failed"`; the draft has no
-  issue, recommendation, or note about dependencies.
+  issue at any severity, no `required_changes` entry, and no markdown
+  mention of dependencies.
 
 ### NOT a concern in this category
 
+- The draft addressed the upstream finding in `issues.major`, `issues.minor`,
+  or `issues.suggestions`. Critic-grade omission requires the finding to be
+  absent from the ENTIRE draft, not just `issues.critical`. **Check every
+  severity bucket before flagging.**
+- The draft addressed the upstream finding in `required_changes` (as an
+  R-row) but did not mirror it in `issues`. Addressing it once is enough.
+- The draft consolidated several upstream items into one combined issue
+  (e.g. KBE flagged six reproducibility gaps; draft surfaced them as a
+  single "missing environment metadata" issue covering all six). That is
+  synthesis, not omission, as long as nothing material is dropped.
+- The draft mentioned the upstream finding only in the markdown narrative
+  (e.g. `final_review.md` discusses the assumption) without an issue entry.
+  Surface in prose counts.
 - Upstream made a `pass` finding that the draft doesn't mention. Pass
   findings don't need surfacing.
 - Upstream flagged a stylistic preference (e.g. "code could be more
   readable"). Style observations from upstream are not material.
 - The draft mentions the upstream finding briefly but not as prominently
   as the Critic would prefer. That's editorial.
+
+### Before flagging, ask
+
+1. Did I check `issues.critical`, `issues.major`, `issues.minor`, AND
+   `issues.suggestions`? (All four severities count as "the draft addressed it".)
+2. Did I check `required_changes`? (An R-row addressing the upstream item
+   counts as addressed, even with no matching `issues` entry.)
+3. Did I check the markdown narrative? (Substantive prose mention counts.)
+4. Is the upstream item material to the verdict — i.e. would surfacing it
+   plausibly change `verdict`, `risk_score`, or `risk_level`? If not, the
+   draft was right to omit it.
+
+If any of (1)-(3) shows the draft addressed it, this is NOT a concern.
+If (4) is "no", this is NOT a concern (it's editorial preference).
 
 ---
 
