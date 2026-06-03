@@ -235,7 +235,14 @@ def _risk_prompt(context: str, assessment_status: str) -> str:
         '"ACCEPT|MINOR REVISION|MAJOR REVISION|REJECT", "issues": {"critical": [], '
         '"major": [], "minor": [], "suggestions": []}, "required_changes": []} — no '
         "prose, no markdown fences. Each issue is an object with id, description and "
-        "an evidence file path under ai4r/<review_title>/."
+        "an evidence file path under ai4r/<review_title>/.\n\n"
+        "Each required_changes entry MUST be concrete and actionable. A good entry "
+        'names a specific action verb (replace, add, remove, rename, pin, document) '
+        "and the file or identifier affected, e.g.: "
+        '"Replace `setwd()` calls in DoFiguresTables.R with relative paths via '
+        "here::here()\". Reject vague phrasing like 'improve the documentation' or "
+        "'enhance reproducibility' — every R-row must point at a specific change a "
+        "reader can make."
     )
 
 
@@ -279,7 +286,11 @@ def _checklist_prompt(context: str, assessment_status: str) -> str:
         "Fill every [VERDICT] token with exactly one of: PASS, FAIL, UNVERIFIED.\n"
         "Fill every [AUDIT NOTE] with one sentence citing file:line from the upstream outputs.\n"
         "Use [x] for PASS, [ ] for FAIL and UNVERIFIED.\n"
-        "Append **Required action:** sub-bullet ONLY on FAIL items.\n"
+        "Append **Required action:** sub-bullet ONLY on FAIL items. Each "
+        "Required action MUST name a concrete change (action verb + file or "
+        "identifier), not a generic suggestion. Example good: 'Add "
+        "`set.seed(42)` at the top of MCMC.R'. Example bad: 'Ensure "
+        "reproducibility'.\n"
         "Never rename, reorder, or omit items.\n"
         "Output the filled template as GitHub-flavoured Markdown only. Do NOT "
         "wrap the response in a ```markdown ... ``` fence — the output IS the "
@@ -299,7 +310,18 @@ def _md_prompt(guidance: str, context: str, assessment_status: str) -> str:
         "upstream outputs do not contain. Do NOT wrap the response in a "
         "```markdown ... ``` fence — the output IS the document, not a code "
         "block containing one. Inner ```r / ```python fences for code samples "
-        "are fine."
+        "are fine.\n\n"
+        "Style discipline:\n"
+        "  - Write directly. Avoid hedging words (may, might, could, appears "
+        "to, seems to, arguably) unless the evidence itself is genuinely "
+        "uncertain — and when it is, name the uncertainty rather than "
+        "softening tone.\n"
+        "  - When stating the verdict, justify it by citing at least one "
+        "specific issue ID (C1, M2, ...) from the risk_matrix. A verdict "
+        "asserted without anchoring to an issue is unjustified.\n"
+        "  - Recommended changes must be concrete. 'Replace `setwd()` with "
+        "`here::here()` in DoFiguresTables.R' is concrete; 'improve "
+        "documentation' is not."
     )
 
 
@@ -476,7 +498,12 @@ def _synthesis_final_prompt(
         "revised_risk_matrix and revised_markdown_files when you actually "
         "need to change content. Do NOT wrap any markdown in ```markdown "
         "fences. Do NOT include paper_id, assessed_at, or upstream_status "
-        "changes — those are orchestrator-owned and will be ignored."
+        "changes — those are orchestrator-owned and will be ignored.\n\n"
+        "When you DO revise content, the same style discipline as the draft "
+        "applies: avoid hedging unless the evidence is genuinely uncertain; "
+        "every recommended change must name a concrete action + file or "
+        "identifier (not 'improve documentation'); every verdict in prose "
+        "must cite at least one issue ID from risk_matrix."
     )
 
 

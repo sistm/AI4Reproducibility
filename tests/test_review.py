@@ -1005,3 +1005,63 @@ def test_final_pass_blocking_only_addresses_blocking_and_material(tmp_path):
     rm = run_review("p", root=tmp_path, complete_fn=_backend(critique=crit))
     ids = {a["id"] for a in rm["addressed_concerns"]}
     assert ids == {"K1", "K2"}  # K3 advisory omitted from auto-deferral
+
+
+# --- Synthesiser prompt tightening (patch 0048) -------------------------------
+#
+# These lock the anti-hedge / verdict-must-cite / concrete-R-row directives
+# into the four prompt builders. The directives are belt-and-braces against
+# style failures the Critic was deliberately scoped NOT to catch (see
+# HANDOFF_supplement_post-0045 "Style linter" queued item). Failures here
+# mean the prompt regressed — not that the model misbehaved.
+
+
+def test_risk_prompt_demands_concrete_required_changes():
+    from tools.orchestrator.review import _risk_prompt
+
+    p = _risk_prompt("ctx", "complete")
+    # Names the failure mode and gives a concrete example to anchor to.
+    assert "concrete and actionable" in p
+    assert "action verb" in p
+    assert "improve the documentation" in p  # named as a rejected pattern
+
+
+def test_md_prompt_demands_anti_hedge_and_cited_verdict():
+    from tools.orchestrator.review import _md_prompt
+
+    p = _md_prompt("a final review", "ctx", "complete")
+    # Anti-hedge: names the specific hedging words to avoid.
+    assert "hedging" in p.lower()
+    for word in ("may", "might", "could", "appears to"):
+        assert word in p
+    # Verdict-must-cite: requires anchoring to issue IDs.
+    assert "issue ID" in p
+    assert "C1" in p or "M2" in p
+    # Concrete-R-row: same example pattern as _risk_prompt.
+    assert "improve documentation" in p or "improve the documentation" in p
+
+
+def test_checklist_prompt_demands_concrete_required_actions():
+    from tools.orchestrator.review import _checklist_prompt
+
+    p = _checklist_prompt("ctx", "complete")
+    # Required-action sub-bullets must be concrete.
+    assert "Required action" in p
+    assert "concrete" in p
+    assert "action verb" in p
+    # Named negative pattern.
+    assert "Ensure reproducibility" in p or "improve documentation" in p
+
+
+def test_synthesis_final_prompt_carries_style_discipline():
+    """Revisions emitted by the final pass must follow the same style rules."""
+    from tools.orchestrator.review import _synthesis_final_prompt
+
+    rm = {"verdict": "MINOR REVISION", "risk_score": 50}
+    md = {"final_review.md": "x", "checklist.md": "y", "exhaustive_audit_report.md": "z"}
+    critique = {"concerns": [{"id": "K1", "severity": "blocking"}]}
+    p = _synthesis_final_prompt(rm, md, critique)
+    assert "style discipline" in p
+    assert "hedging" in p.lower()
+    assert "concrete action" in p
+    assert "issue ID" in p
