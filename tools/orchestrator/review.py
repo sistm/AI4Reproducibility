@@ -413,6 +413,244 @@ def _write_review(review_dir: Path, risk_matrix: dict[str, Any], md_files: dict[
     )
 
 
+# --- Synthesiser final pass (patch 0047) -------------------------------------
+#
+# Runs only when the Critic surfaced blocking or material concerns. One LLM
+# call asks the Synthesiser to address the concerns by emitting:
+#   * ``addressed_concerns``: list of {id, resolution, reason} — one entry per
+#     concern, resolution in {incorporated, refuted, deferred}.
+#   * ``revised_risk_matrix``: OPTIONAL full replacement for rm core fields.
+#     Omit when no rm changes are warranted.
+#   * ``revised_markdown_files``: OPTIONAL {filename: text} — only include
+#     files that change.
+#
+# The Synthesiser is instructed to keep the response minimal (don't regenerate
+# unchanged content) to stay under the output cap. Failures fall back to draft
+# + every concern auto-deferred — never raises.
+
+_RESOLUTIONS = {"incorporated", "refuted", "deferred"}
+
+
+def _synthesis_final_prompt(
+    rm: dict[str, Any], md_files: dict[str, str], critique: dict[str, Any]
+) -> str:
+    """Build the prompt for the Synthesiser final pass.
+
+    Receives the draft (rm + three md files) and the critique with its
+    concerns. Asks for a structured patch response rather than full
+    regeneration so the response stays small in the common case.
+    """
+    concerns_json = json.dumps(critique.get("concerns", []), indent=2)
+    rm_json = json.dumps(rm, indent=2)
+    return (
+        f"{_UPSTREAM_SECURITY_NOTICE}\n\n"
+        "You are the Synthesiser, finalising a reproducibility review after an "
+        "adversarial Critic raised concerns about your draft. Address each "
+        "blocking concern (incorporate, refute with reason, or defer with "
+        "reason) and each material concern (same options). Advisory concerns "
+        "may be addressed or ignored.\n\n"
+        f"<draft_risk_matrix>\n{rm_json}\n</draft_risk_matrix>\n\n"
+        f"<draft_final_review>\n{md_files.get('final_review.md', '')}\n</draft_final_review>\n\n"
+        f"<draft_checklist>\n{md_files.get('checklist.md', '')}\n</draft_checklist>\n\n"
+        f"<draft_exhaustive_audit_report>\n{md_files.get('exhaustive_audit_report.md', '')}\n</draft_exhaustive_audit_report>\n\n"
+        f"<critic_concerns>\n{concerns_json}\n</critic_concerns>\n\n"
+        "---\n\n"
+        "Return ONLY a single JSON object with these fields:\n"
+        '  "addressed_concerns": [ {"id": "K1", "resolution": '
+        '"incorporated"|"refuted"|"deferred", "reason": "<one sentence>"}, ... ]\n'
+        "    — MUST contain one entry per blocking concern AND one per material\n"
+        "    concern. Advisory concerns may be omitted.\n"
+        '  "revised_risk_matrix": <full new rm core dict, OR null if no rm '
+        "changes are needed>. When present, must contain the same ten top-"
+        "level keys as the draft (verdict, risk_score, risk_level, issues, "
+        "required_changes, paper_id, paper_title, assessed_at, "
+        "assessment_status, upstream_status). DO NOT add or rename keys.\n"
+        '  "revised_markdown_files": <{"filename": "<full new text>"} for ONLY '
+        "the files that change, OR null if no md changes are needed>. Valid "
+        "filenames: final_review.md, checklist.md, exhaustive_audit_report.md. "
+        "Each value must be the COMPLETE new file contents (the file is "
+        "replaced wholesale; partial diffs are not supported).\n\n"
+        "Keep the response minimal: when the draft already addresses a "
+        'concern, use "refuted" with the reason; when a concern is valid but '
+        'out of scope for this audit, use "deferred". Only emit '
+        "revised_risk_matrix and revised_markdown_files when you actually "
+        "need to change content. Do NOT wrap any markdown in ```markdown "
+        "fences. Do NOT include paper_id, assessed_at, or upstream_status "
+        "changes — those are orchestrator-owned and will be ignored."
+    )
+
+
+def _normalise_addressed(raw: Any, required_ids: set[str]) -> list[dict[str, Any]]:
+    """Validate addressed_concerns and ensure every required id is present.
+
+    ``required_ids`` are the concern IDs that MUST appear (blocking + material).
+    Missing IDs are auto-added as ``deferred`` with a synthetic reason.
+    """
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    if isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            cid = entry.get("id")
+            resolution = entry.get("resolution")
+            reason = entry.get("reason", "")
+            if (
+                not isinstance(cid, str)
+                or resolution not in _RESOLUTIONS
+                or not isinstance(reason, str)
+                or not reason.strip()
+            ):
+                continue
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            out.append({"id": cid, "resolution": resolution, "reason": reason})
+    # Auto-add any required concern the Synthesiser omitted.
+    for cid in required_ids - seen_ids:
+        out.append({
+            "id": cid,
+            "resolution": "deferred",
+            "reason": "Synthesiser final pass output omitted this concern; "
+                      "auto-deferred so the audit trail stays complete.",
+        })
+    return out
+
+
+def _apply_revised_rm(
+    draft_rm: dict[str, Any], revised: Any
+) -> tuple[dict[str, Any], bool]:
+    """Return (rm_to_use, was_revised).
+
+    Only honoured if ``revised`` is a dict carrying all ten required top-level
+    keys. Orchestrator-owned fields (paper_id, paper_title, assessed_at,
+    upstream_status) are overwritten by the draft values regardless of what
+    the Synthesiser emitted — model output never wins on identity fields.
+    Partial revisions (missing keys) are rejected entirely as a malformed
+    response; the draft stands.
+    """
+    if not isinstance(revised, dict):
+        return draft_rm, False
+    required = {
+        "verdict", "risk_score", "risk_level", "issues", "required_changes",
+        "paper_id", "paper_title", "assessed_at", "assessment_status",
+        "upstream_status",
+    }
+    if not required.issubset(revised.keys()):
+        return draft_rm, False
+    # Defensive copy, then re-pin orchestrator-owned fields.
+    final = dict(revised)
+    for key in ("paper_id", "paper_title", "assessed_at", "upstream_status"):
+        final[key] = draft_rm[key]
+    # Preserve recovery + md-validation notes from the draft if Synthesiser dropped them.
+    if "notes" in draft_rm and "notes" not in final:
+        final["notes"] = draft_rm["notes"]
+    if "raw_model_output" in draft_rm and "raw_model_output" not in final:
+        final["raw_model_output"] = draft_rm["raw_model_output"]
+    return final, True
+
+
+def _apply_revised_md(
+    draft_md: dict[str, str], revised: Any
+) -> tuple[dict[str, str], list[str]]:
+    """Return (md_to_use, list_of_revised_filenames).
+
+    ``revised`` may be ``None`` or a dict mapping known filenames to full
+    replacement text. Unknown filenames are silently dropped (Synthesiser
+    output is untrusted on structure). The strip-fence pass from 0043 is
+    re-applied to each revised file because the Synthesiser may re-wrap.
+    """
+    if not isinstance(revised, dict):
+        return draft_md, []
+    out = dict(draft_md)
+    revised_names: list[str] = []
+    for name in _MD_OUTPUTS:  # only known filenames count
+        text = revised.get(name)
+        if isinstance(text, str) and text.strip():
+            out[name] = _strip_outer_md_fence(text)
+            revised_names.append(name)
+    return out, revised_names
+
+
+def _run_synthesis_final(
+    rm: dict[str, Any],
+    md_files: dict[str, str],
+    critique: dict[str, Any],
+    model_name: str,
+    complete_fn: CompleteFn | None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Run the Synthesiser final pass; return (revised_rm, revised_md_files).
+
+    Always returns valid outputs. On any failure (transport, parse, repair-
+    chain exhaustion, malformed structure), the draft stands and the rm
+    gains an ``addressed_concerns`` array where every required concern is
+    auto-deferred — never raises.
+    """
+    actionable_ids = {
+        c["id"] for c in critique.get("concerns", [])
+        if c.get("severity") in ("blocking", "material") and isinstance(c.get("id"), str)
+    }
+
+    def _fallback(reason: str) -> tuple[dict[str, Any], dict[str, str]]:
+        addressed = [
+            {"id": cid, "resolution": "deferred",
+             "reason": f"Synthesiser final pass {reason}; concern auto-deferred."}
+            for cid in sorted(actionable_ids)
+        ]
+        out_rm = dict(rm)
+        out_rm["addressed_concerns"] = addressed
+        existing = out_rm.get("notes", "")
+        fallback_note = f"[synthesis final pass failed: {reason}]"
+        out_rm["notes"] = (
+            f"{existing}\n{fallback_note}".strip() if existing else fallback_note
+        )
+        return out_rm, md_files
+
+    try:
+        raw = _run_call(_synthesis_final_prompt(rm, md_files, critique),
+                        model_name, complete_fn)
+    except Exception as exc:
+        return _fallback(f"llm_request_failed ({exc})")
+
+    repaired_via: str | None = None
+    try:
+        parsed = parse_json_object(raw)
+    except (ValueError, json.JSONDecodeError) as exc:
+        parsed = _repair_json_deterministic(raw)
+        if parsed is not None:
+            repaired_via = "deterministic"
+        else:
+            parsed = _repair_json_once(raw, exc, model=model_name,
+                                       complete_fn=complete_fn)
+            if parsed is not None:
+                repaired_via = "reprompt"
+        if parsed is None:
+            return _fallback(f"output_parse_failed ({exc})")
+
+    addressed = _normalise_addressed(parsed.get("addressed_concerns"), actionable_ids)
+    final_rm, rm_revised = _apply_revised_rm(rm, parsed.get("revised_risk_matrix"))
+    final_md, md_revised = _apply_revised_md(md_files, parsed.get("revised_markdown_files"))
+    final_rm["addressed_concerns"] = addressed
+    # Track which artifacts the final pass actually changed for the audit trail.
+    if rm_revised or md_revised:
+        revisions: list[str] = []
+        if rm_revised:
+            revisions.append("risk_matrix")
+        revisions.extend(md_revised)
+        existing = final_rm.get("notes", "")
+        rev_note = f"[synthesis final pass revised: {', '.join(revisions)}]"
+        final_rm["notes"] = f"{existing}\n{rev_note}".strip() if existing else rev_note
+    if repaired_via is not None:
+        existing = final_rm.get("notes", "")
+        repair_note = (
+            f"[synthesis final pass JSON recovered via {repaired_via} repair]"
+        )
+        final_rm["notes"] = (
+            f"{existing}\n{repair_note}".strip() if existing else repair_note
+        )
+    return final_rm, final_md
+
+
 def run_review(
     review_title: str,
     *,
@@ -550,11 +788,7 @@ def run_review(
     # §5e adversarial Review: run the Critic against the in-memory draft to
     # surface epistemic gaps (evidence_gap, over_charitable, under_charitable,
     # internal_inconsistency, missing_upstream_signal). The Critic writes
-    # ``critique.json`` next to the Review artifacts. In this patch the
-    # critique runs but does NOT modify the verdict or markdown — patch 0047
-    # adds the Synthesiser final pass that consumes critique to revise the
-    # draft. For now ``critique.json`` is an auxiliary artifact a human reader
-    # can consult alongside the verdict.
+    # ``critique.json`` next to the Review artifacts.
     critique = run_critique(
         review_title,
         upstream={"kbe": kbe or {}, "cqv": cqv or {}},
@@ -574,6 +808,23 @@ def run_review(
         )
         existing = rm.get("notes", "")
         rm["notes"] = f"{existing}\n{crit_note}".strip() if existing else crit_note
+    else:
+        # Synthesiser final pass: run only when the critique surfaced
+        # actionable concerns (blocking OR material). no_concerns / failed /
+        # all-advisory critiques skip the call entirely — latency proportional
+        # to need. When the final pass runs, the Synthesiser may revise the
+        # rm core (verdict, risk_score, issues, ...) and any subset of the
+        # markdown files to address the concerns; ``addressed_concerns`` is
+        # attached to rm as the audit trail. Failure of the final pass itself
+        # falls back to draft + auto-deferred concerns — never raises.
+        actionable = [
+            c for c in critique.get("concerns", [])
+            if c.get("severity") in ("blocking", "material")
+        ]
+        if actionable:
+            rm, md_files = _run_synthesis_final(
+                rm, md_files, critique, model_name, complete_fn
+            )
 
     _write_review(review_dir, rm, md_files)
     return rm

@@ -65,21 +65,35 @@ _GOOD_MD = (
 # need a specific critique payload override via the `critique=` parameter.
 _GOOD_CRITIQUE = '{"status": "no_concerns", "concerns": []}'
 
+# Default Synthesis final-pass response: empty addressed_concerns and no
+# revisions. _normalise_addressed will auto-defer any actionable concerns
+# the critique surfaced. Tests that need a substantive final-pass override
+# via the `synth=` parameter.
+_GOOD_SYNTH = (
+    '{"addressed_concerns": [], "revised_risk_matrix": null, '
+    '"revised_markdown_files": null}'
+)
+
 
 def _backend(
     core: str = GOOD_CORE,
     md: str = _GOOD_MD,
     critique: str = _GOOD_CRITIQUE,
+    synth: str = _GOOD_SYNTH,
 ):
     def b(model, messages, tools):
         u = messages[-1]["content"]
-        # Critic prompt has its own fingerprint: rubric injection + draft tags.
+        # Synthesis final-pass: has BOTH <draft_risk_matrix> and <critic_concerns>.
+        # Check this FIRST since it shares the draft tag with the Critic prompt.
+        if "<critic_concerns>" in u:
+            return LLMResponse(text=synth)
+        # Critic prompt has draft tags but no critic_concerns (it produces them).
         if "<draft_risk_matrix>" in u:
             return LLMResponse(text=critique)
-        # Risk-matrix core call: the only one asking for risk_score JSON.
+        # Risk-matrix core call.
         if '"risk_score"' in u and "Return ONLY" in u:
             return LLMResponse(text=core)
-        # Markdown calls (final_review, checklist, exhaustive_audit_report).
+        # Markdown calls.
         return LLMResponse(text=md)
 
     return b
@@ -738,3 +752,256 @@ def test_critic_does_not_run_on_all_upstream_failed(tmp_path):
     assert rm["failure_mode"] == "all_upstream_failed"
     cj_path = tmp_path / "ai4r" / "p" / "review" / "critique.json"
     assert not cj_path.exists()  # Critic skipped on hard-fail
+
+
+# --- Synthesiser final pass (patch 0047) -------------------------------------
+
+
+def _critique_with(concerns):
+    """Helper: build a critique payload with given concern dicts."""
+    return json.dumps({"status": "complete", "concerns": concerns})
+
+
+_CONCERN_BLOCKING = {
+    "id": "K1",
+    "category": "evidence_gap",
+    "severity": "blocking",
+    "draft_claim": "Critical: missing data.",
+    "concern": "Evidence too generic.",
+    "evidence_refs": ["ai4r/p/cqv/repo_analysis.md"],
+    "suggested_action": "Cite file:line.",
+}
+_CONCERN_MATERIAL = {**_CONCERN_BLOCKING, "id": "K2", "severity": "material"}
+_CONCERN_ADVISORY = {**_CONCERN_BLOCKING, "id": "K3", "severity": "advisory"}
+
+
+def test_final_pass_skipped_on_no_concerns(tmp_path):
+    """no_concerns critique -> no final pass call -> no addressed_concerns in rm."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    call_count = {"synth": 0}
+
+    def counting(model, messages, tools):
+        u = messages[-1]["content"]
+        if "<critic_concerns>" in u:
+            call_count["synth"] += 1
+            return LLMResponse(text=_GOOD_SYNTH)
+        if "<draft_risk_matrix>" in u:
+            return LLMResponse(text=_GOOD_CRITIQUE)
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        return LLMResponse(text=_GOOD_MD)
+
+    rm = run_review("p", root=tmp_path, complete_fn=counting)
+    assert call_count["synth"] == 0  # no final pass on no_concerns
+    assert "addressed_concerns" not in rm
+
+
+def test_final_pass_skipped_on_advisory_only(tmp_path):
+    """Advisory-only critique -> no final pass (latency proportional to need)."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    call_count = {"synth": 0}
+
+    def counting(model, messages, tools):
+        u = messages[-1]["content"]
+        if "<critic_concerns>" in u:
+            call_count["synth"] += 1
+            return LLMResponse(text=_GOOD_SYNTH)
+        if "<draft_risk_matrix>" in u:
+            return LLMResponse(text=_critique_with([_CONCERN_ADVISORY]))
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        return LLMResponse(text=_GOOD_MD)
+
+    rm = run_review("p", root=tmp_path, complete_fn=counting)
+    assert call_count["synth"] == 0
+    assert "addressed_concerns" not in rm
+
+
+def test_final_pass_runs_on_blocking_concern(tmp_path):
+    """Blocking concern -> final pass runs -> addressed_concerns in rm."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    rm = run_review("p", root=tmp_path,
+                    complete_fn=_backend(critique=_critique_with([_CONCERN_BLOCKING])))
+    assert "addressed_concerns" in rm
+    # Default synth fixture has empty addressed_concerns, so the blocking
+    # concern is auto-deferred.
+    assert len(rm["addressed_concerns"]) == 1
+    assert rm["addressed_concerns"][0]["id"] == "K1"
+    assert rm["addressed_concerns"][0]["resolution"] == "deferred"
+    assert "auto-deferred" in rm["addressed_concerns"][0]["reason"]
+
+
+def test_final_pass_honours_model_supplied_resolutions(tmp_path):
+    """When Synthesiser emits explicit resolutions, they win over auto-deferral."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    synth_response = json.dumps({
+        "addressed_concerns": [
+            {"id": "K1", "resolution": "incorporated",
+             "reason": "Tightened evidence cite to DoFiguresTables.R:12."},
+            {"id": "K2", "resolution": "refuted",
+             "reason": "Draft already cites the specific line."},
+        ],
+        "revised_risk_matrix": None,
+        "revised_markdown_files": None,
+    })
+    crit = _critique_with([_CONCERN_BLOCKING, _CONCERN_MATERIAL])
+    rm = run_review("p", root=tmp_path,
+                    complete_fn=_backend(critique=crit, synth=synth_response))
+    by_id = {a["id"]: a for a in rm["addressed_concerns"]}
+    assert by_id["K1"]["resolution"] == "incorporated"
+    assert by_id["K2"]["resolution"] == "refuted"
+
+
+def test_final_pass_revises_risk_matrix_when_emitted(tmp_path):
+    """A complete revised_risk_matrix replaces the rm core (identity preserved)."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    revised_rm = {
+        # All ten required top-level keys present:
+        "paper_id": "should-be-overwritten",  # orchestrator overrides
+        "paper_title": "should-be-overwritten",
+        "assessed_at": "1970-01-01T00:00:00Z",
+        "upstream_status": {},
+        "assessment_status": "complete",
+        "verdict": "MAJOR REVISION",  # changed from MINOR
+        "risk_score": 70,
+        "risk_level": "HIGH",
+        "issues": {"critical": [{"id": "C1", "description": "x", "evidence": "y"}],
+                   "major": [], "minor": [], "suggestions": []},
+        "required_changes": [{"id": "R1", "description": "x", "addresses": ["C1"]}],
+    }
+    synth = json.dumps({
+        "addressed_concerns": [{"id": "K1", "resolution": "incorporated",
+                                 "reason": "Escalated to MAJOR per blocking concern."}],
+        "revised_risk_matrix": revised_rm,
+        "revised_markdown_files": None,
+    })
+    rm = run_review("p", root=tmp_path,
+                    complete_fn=_backend(critique=_critique_with([_CONCERN_BLOCKING]),
+                                          synth=synth))
+    # Revised fields applied:
+    assert rm["verdict"] == "MAJOR REVISION"
+    assert rm["risk_score"] == 70
+    # Orchestrator-owned fields NOT overwritten by model:
+    assert rm["paper_id"] == "p"
+    assert rm["paper_title"] == "T"
+    assert not rm["assessed_at"].startswith("1970")
+    # Audit-trail note records the revision:
+    assert "synthesis final pass revised" in rm["notes"]
+    assert "risk_matrix" in rm["notes"]
+
+
+def test_final_pass_partial_rm_rejected(tmp_path):
+    """An rm revision missing required keys is rejected; draft stands."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    incomplete = {"verdict": "REJECT", "risk_score": 95}  # missing 8 keys
+    synth = json.dumps({
+        "addressed_concerns": [{"id": "K1", "resolution": "incorporated",
+                                 "reason": "x"}],
+        "revised_risk_matrix": incomplete,
+        "revised_markdown_files": None,
+    })
+    rm = run_review("p", root=tmp_path,
+                    complete_fn=_backend(critique=_critique_with([_CONCERN_BLOCKING]),
+                                          synth=synth))
+    # Draft preserved: still MINOR REVISION from GOOD_CORE fixture
+    assert rm["verdict"] == "MINOR REVISION"
+    # Synthesiser's addressed_concerns still applied
+    assert rm["addressed_concerns"][0]["resolution"] == "incorporated"
+
+
+def test_final_pass_revises_markdown_files_when_emitted(tmp_path):
+    """A revised md file replaces the draft on disk; strip-fence applied."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    # The Synthesiser may re-wrap; the strip-fence pass from 0043 must catch it.
+    revised_body = (
+        "# Final Review (revised)\n\nVerdict: **MAJOR REVISION**\n\n"
+        "## Checklist\n- [x] **[PASS]** item\n\n"
+        "Revised body that is well over the minimum length threshold so that "
+        "validation passes downstream and the final review carries every "
+        "structural marker the per-file validators check.\n"
+    )
+    synth = json.dumps({
+        "addressed_concerns": [{"id": "K1", "resolution": "incorporated",
+                                 "reason": "x"}],
+        "revised_risk_matrix": None,
+        "revised_markdown_files": {
+            "final_review.md": f"```markdown\n{revised_body}```",  # re-wrapped
+        },
+    })
+    run_review("p", root=tmp_path,
+               complete_fn=_backend(critique=_critique_with([_CONCERN_BLOCKING]),
+                                     synth=synth))
+    fr = (tmp_path / "ai4r" / "p" / "review" / "final_review.md").read_text()
+    assert not fr.lstrip().startswith("```")  # 0043 strip applied to revision
+    assert "Final Review (revised)" in fr
+
+
+def test_final_pass_unknown_md_filename_silently_dropped(tmp_path):
+    """Synthesiser emitting an unrecognised filename is ignored, not crashed."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    synth = json.dumps({
+        "addressed_concerns": [{"id": "K1", "resolution": "incorporated",
+                                 "reason": "x"}],
+        "revised_risk_matrix": None,
+        "revised_markdown_files": {"made_up_file.md": "evil content"},
+    })
+    rm = run_review("p", root=tmp_path,
+                    complete_fn=_backend(critique=_critique_with([_CONCERN_BLOCKING]),
+                                          synth=synth))
+    # made_up_file.md not written; only the standard three exist.
+    rdir = tmp_path / "ai4r" / "p" / "review"
+    assert not (rdir / "made_up_file.md").exists()
+    assert (rdir / "final_review.md").is_file()
+    # Audit-trail note absent since no real revision happened.
+    assert "synthesis final pass revised" not in rm.get("notes", "")
+
+
+def test_final_pass_llm_transport_failure_falls_back_to_draft(tmp_path):
+    """Final-pass LLM failure -> draft stands, every concern auto-deferred."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+
+    def selective(model, messages, tools):
+        u = messages[-1]["content"]
+        if "<critic_concerns>" in u:
+            raise RuntimeError("synth gateway down")
+        if "<draft_risk_matrix>" in u:
+            return LLMResponse(text=_critique_with([_CONCERN_BLOCKING, _CONCERN_MATERIAL]))
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        return LLMResponse(text=_GOOD_MD)
+
+    rm = run_review("p", root=tmp_path, complete_fn=selective)
+    assert rm["assessment_status"] == "complete"  # not degraded
+    assert "synthesis final pass failed" in rm["notes"]
+    assert "llm_request_failed" in rm["notes"]
+    # All actionable concerns auto-deferred
+    by_id = {a["id"]: a for a in rm["addressed_concerns"]}
+    assert by_id["K1"]["resolution"] == "deferred"
+    assert by_id["K2"]["resolution"] == "deferred"
+
+
+def test_final_pass_parse_failure_falls_back_to_draft(tmp_path, monkeypatch):
+    """Final-pass JSON parse + repair exhausted -> draft stands."""
+    from tools.orchestrator import review as review_mod
+
+    monkeypatch.setattr(review_mod, "_repair_json_deterministic", lambda text: None)
+    monkeypatch.setattr(
+        review_mod, "_repair_json_once",
+        lambda bad, error, *, model, complete_fn: None,
+    )
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    rm = run_review("p", root=tmp_path,
+                    complete_fn=_backend(critique=_critique_with([_CONCERN_BLOCKING]),
+                                          synth="not JSON at all {{{"))
+    assert "synthesis final pass failed" in rm["notes"]
+    assert "output_parse_failed" in rm["notes"]
+    assert rm["addressed_concerns"][0]["resolution"] == "deferred"
+
+
+def test_final_pass_blocking_only_addresses_blocking_and_material(tmp_path):
+    """Auto-deferral fills in missing required_ids (blocking + material), not advisory."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    crit = _critique_with([_CONCERN_BLOCKING, _CONCERN_MATERIAL, _CONCERN_ADVISORY])
+    rm = run_review("p", root=tmp_path, complete_fn=_backend(critique=crit))
+    ids = {a["id"] for a in rm["addressed_concerns"]}
+    assert ids == {"K1", "K2"}  # K3 advisory omitted from auto-deferral
