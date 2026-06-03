@@ -435,76 +435,138 @@ def _write_review(review_dir: Path, risk_matrix: dict[str, Any], md_files: dict[
     )
 
 
-# --- Synthesiser final pass (patch 0047) -------------------------------------
+# --- Synthesiser final pass (patches 0047 + 0051) ----------------------------
 #
-# Runs only when the Critic surfaced blocking or material concerns. One LLM
-# call asks the Synthesiser to address the concerns by emitting:
-#   * ``addressed_concerns``: list of {id, resolution, reason} — one entry per
-#     concern, resolution in {incorporated, refuted, deferred}.
-#   * ``revised_risk_matrix``: OPTIONAL full replacement for rm core fields.
-#     Omit when no rm changes are warranted.
-#   * ``revised_markdown_files``: OPTIONAL {filename: text} — only include
-#     files that change.
+# Two-call design (0051): Call 1 produces addressed_concerns only (small input
+# and output); Call 2 produces rm + md revisions, runs only when Call 1
+# resolved at least one concern as "incorporated". The split exists to protect
+# the audit trail — observed failure mode (bimj_202400278 smoke run) was a
+# Mistral InternalServerError on the single big call, which left addressed_
+# concerns as nine identical auto-deferrals and the rm/md contradiction the
+# Critic had flagged (K4) shipped unchanged. After 0051 the audit trail
+# survives a Call 2 failure: each incorporated concern still has its reason
+# recorded, the rm/md just don't get revised. A note records which pass died.
 #
-# The Synthesiser is instructed to keep the response minimal (don't regenerate
-# unchanged content) to stay under the output cap. Failures fall back to draft
-# + every concern auto-deferred — never raises.
+# Per-call fallbacks are independent. Worst case (Call 1 fails): all concerns
+# auto-deferred, mirrors pre-0051 behaviour. Best case (both succeed): audit +
+# revisions both land. Middle case (Call 1 OK, Call 2 fails): audit preserved,
+# revisions skipped, note in rm.notes records why — the reader can see the
+# Critic's concerns and the Synthesiser's intended resolutions even when the
+# transport gave out.
 
 _RESOLUTIONS = {"incorporated", "refuted", "deferred"}
 
 
-def _synthesis_final_prompt(
-    rm: dict[str, Any], md_files: dict[str, str], critique: dict[str, Any]
+def _synthesis_audit_prompt(
+    rm: dict[str, Any], critique: dict[str, Any]
 ) -> str:
-    """Build the prompt for the Synthesiser final pass.
+    """Build Call 1's prompt: addressed_concerns audit only.
 
-    Receives the draft (rm + three md files) and the critique with its
-    concerns. Asks for a structured patch response rather than full
-    regeneration so the response stays small in the common case.
+    Intentionally small: input is just the rm core + the Critic's concerns
+    (no markdown files), output is just the audit list. This is the call that
+    MUST succeed for the audit trail to exist, so we keep it light.
     """
     concerns_json = json.dumps(critique.get("concerns", []), indent=2)
     rm_json = json.dumps(rm, indent=2)
     return (
         f"{_UPSTREAM_SECURITY_NOTICE}\n\n"
-        "You are the Synthesiser, finalising a reproducibility review after an "
-        "adversarial Critic raised concerns about your draft. Address each "
-        "blocking concern (incorporate, refute with reason, or defer with "
-        "reason) and each material concern (same options). Advisory concerns "
-        "may be addressed or ignored.\n\n"
+        "You are the Synthesiser. The adversarial Critic raised the concerns "
+        "below about your draft. For each blocking and material concern, "
+        "decide: did you already address it (refute), will you fix it "
+        "(incorporate), or is it valid but out of scope (defer)? Advisory "
+        "concerns may be addressed or skipped.\n\n"
+        f"<draft_risk_matrix>\n{rm_json}\n</draft_risk_matrix>\n\n"
+        f"<critic_concerns>\n{concerns_json}\n</critic_concerns>\n\n"
+        "---\n\n"
+        "Return ONLY a single JSON object:\n"
+        '  {"addressed_concerns": [ {"id": "K1", "resolution": '
+        '"incorporated"|"refuted"|"deferred", "reason": "<one sentence>"}, '
+        "... ]}\n\n"
+        "Rules:\n"
+        "  - One entry per blocking concern AND one per material concern. "
+        "Advisory may be omitted.\n"
+        '  - Use "incorporated" when you intend to change the rm or markdown '
+        "to address the concern. A separate pass will collect those changes.\n"
+        '  - Use "refuted" when the draft already addresses it; the reason '
+        "must say where (issue ID, file path, or specific draft text).\n"
+        '  - Use "deferred" when the concern is valid but out of scope.\n'
+        "  - No prose, no markdown fences. Do NOT include rm or markdown "
+        "revisions here — those go in the next call."
+    )
+
+
+def _synthesis_revisions_prompt(
+    rm: dict[str, Any],
+    md_files: dict[str, str],
+    critique: dict[str, Any],
+    incorporated: list[dict[str, Any]],
+) -> str:
+    """Build Call 2's prompt: rm + md revisions for incorporated concerns.
+
+    Only runs when Call 1 marked at least one concern as ``incorporated``.
+    Includes the full draft (rm + md), the original concerns for those that
+    were incorporated, and the Synthesiser's own reasons from Call 1 so the
+    model can be consistent with what it just promised.
+    """
+    by_id = {c["id"]: c for c in critique.get("concerns", []) if "id" in c}
+    incorporated_with_context = [
+        {**ic, "concern_detail": by_id.get(ic["id"], {})}
+        for ic in incorporated
+    ]
+    payload = json.dumps(incorporated_with_context, indent=2)
+    rm_json = json.dumps(rm, indent=2)
+    return (
+        f"{_UPSTREAM_SECURITY_NOTICE}\n\n"
+        "You are the Synthesiser, applying the revisions you committed to "
+        "in the previous pass. Each item below was marked 'incorporated' — "
+        "produce the corresponding changes to the rm and/or markdown.\n\n"
         f"<draft_risk_matrix>\n{rm_json}\n</draft_risk_matrix>\n\n"
         f"<draft_final_review>\n{md_files.get('final_review.md', '')}\n</draft_final_review>\n\n"
         f"<draft_checklist>\n{md_files.get('checklist.md', '')}\n</draft_checklist>\n\n"
         f"<draft_exhaustive_audit_report>\n{md_files.get('exhaustive_audit_report.md', '')}\n</draft_exhaustive_audit_report>\n\n"
-        f"<critic_concerns>\n{concerns_json}\n</critic_concerns>\n\n"
+        f"<incorporated_concerns>\n{payload}\n</incorporated_concerns>\n\n"
         "---\n\n"
-        "Return ONLY a single JSON object with these fields:\n"
-        '  "addressed_concerns": [ {"id": "K1", "resolution": '
-        '"incorporated"|"refuted"|"deferred", "reason": "<one sentence>"}, ... ]\n'
-        "    — MUST contain one entry per blocking concern AND one per material\n"
-        "    concern. Advisory concerns may be omitted.\n"
+        "Return ONLY a single JSON object:\n"
         '  "revised_risk_matrix": <full new rm core dict, OR null if no rm '
         "changes are needed>. When present, must contain the same ten top-"
         "level keys as the draft (verdict, risk_score, risk_level, issues, "
         "required_changes, paper_id, paper_title, assessed_at, "
         "assessment_status, upstream_status). DO NOT add or rename keys.\n"
-        '  "revised_markdown_files": <{"filename": "<full new text>"} for ONLY '
-        "the files that change, OR null if no md changes are needed>. Valid "
-        "filenames: final_review.md, checklist.md, exhaustive_audit_report.md. "
-        "Each value must be the COMPLETE new file contents (the file is "
-        "replaced wholesale; partial diffs are not supported).\n\n"
-        "Keep the response minimal: when the draft already addresses a "
-        'concern, use "refuted" with the reason; when a concern is valid but '
-        'out of scope for this audit, use "deferred". Only emit '
-        "revised_risk_matrix and revised_markdown_files when you actually "
-        "need to change content. Do NOT wrap any markdown in ```markdown "
-        "fences. Do NOT include paper_id, assessed_at, or upstream_status "
-        "changes — those are orchestrator-owned and will be ignored.\n\n"
-        "When you DO revise content, the same style discipline as the draft "
-        "applies: avoid hedging unless the evidence is genuinely uncertain; "
-        "every recommended change must name a concrete action + file or "
-        "identifier (not 'improve documentation'); every verdict in prose "
-        "must cite at least one issue ID from risk_matrix."
+        '  "revised_markdown_files": <{"filename": "<full new text>"} for '
+        "ONLY the files that change, OR null if no md changes are needed>. "
+        "Valid filenames: final_review.md, checklist.md, "
+        "exhaustive_audit_report.md. Each value must be the COMPLETE new "
+        "file contents (the file is replaced wholesale).\n\n"
+        "Keep the response minimal: only emit revised content you actually "
+        "need to change. Do NOT wrap any markdown in ```markdown fences. "
+        "Do NOT include paper_id, assessed_at, or upstream_status changes "
+        "— those are orchestrator-owned and will be ignored.\n\n"
+        "Style discipline: avoid hedging unless evidence is genuinely "
+        "uncertain; every recommended change must name a concrete action + "
+        "file or identifier (not 'improve documentation'); every verdict "
+        "in prose must cite at least one issue ID from risk_matrix."
     )
+
+
+def _parse_with_salvage(
+    raw: str, model_name: str, complete_fn: CompleteFn | None
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Mirror the parse-salvage chain used elsewhere.
+
+    Returns ``(parsed, repair_method, error)``. On clean parse: ``(dict, None,
+    None)``. On recovery: ``(dict, 'deterministic' | 'reprompt', None)``. On
+    exhaustion: ``(None, None, error_text)``.
+    """
+    try:
+        return parse_json_object(raw), None, None
+    except (ValueError, json.JSONDecodeError) as exc:
+        parsed = _repair_json_deterministic(raw)
+        if parsed is not None:
+            return parsed, "deterministic", None
+        parsed = _repair_json_once(raw, exc, model=model_name, complete_fn=complete_fn)
+        if parsed is not None:
+            return parsed, "reprompt", None
+        return None, None, str(exc)
 
 
 def _normalise_addressed(raw: Any, required_ids: set[str]) -> list[dict[str, Any]]:
@@ -608,73 +670,119 @@ def _run_synthesis_final(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Run the Synthesiser final pass; return (revised_rm, revised_md_files).
 
-    Always returns valid outputs. On any failure (transport, parse, repair-
-    chain exhaustion, malformed structure), the draft stands and the rm
-    gains an ``addressed_concerns`` array where every required concern is
-    auto-deferred — never raises.
+    Two-call split (patch 0051): Call 1 is the audit (addressed_concerns only,
+    always runs); Call 2 is the revisions (rm + md, runs only if Call 1
+    resolved any concern as ``incorporated``). Each call has its own fallback
+    so a Call 2 failure does NOT poison the addressed_concerns audit trail
+    Call 1 already produced.
+
+    Always returns valid outputs; never raises.
     """
     actionable_ids = {
         c["id"] for c in critique.get("concerns", [])
         if c.get("severity") in ("blocking", "material") and isinstance(c.get("id"), str)
     }
 
-    def _fallback(reason: str) -> tuple[dict[str, Any], dict[str, str]]:
+    def _audit_fallback(reason: str) -> tuple[dict[str, Any], dict[str, str]]:
+        """Call 1 failed: every actionable concern auto-deferred, no revisions."""
         addressed = [
             {"id": cid, "resolution": "deferred",
-             "reason": f"Synthesiser final pass {reason}; concern auto-deferred."}
+             "reason": f"Synthesiser audit pass {reason}; concern auto-deferred."}
             for cid in sorted(actionable_ids)
         ]
         out_rm = dict(rm)
         out_rm["addressed_concerns"] = addressed
         existing = out_rm.get("notes", "")
-        fallback_note = f"[synthesis final pass failed: {reason}]"
-        out_rm["notes"] = (
-            f"{existing}\n{fallback_note}".strip() if existing else fallback_note
-        )
+        note = f"[synthesis audit pass failed: {reason}]"
+        out_rm["notes"] = f"{existing}\n{note}".strip() if existing else note
         return out_rm, md_files
 
+    # ---- Call 1: audit ----
     try:
-        raw = _run_call(_synthesis_final_prompt(rm, md_files, critique),
-                        model_name, complete_fn)
+        raw1 = _run_call(_synthesis_audit_prompt(rm, critique),
+                         model_name, complete_fn)
     except Exception as exc:
-        return _fallback(f"llm_request_failed ({exc})")
+        return _audit_fallback(f"llm_request_failed ({exc})")
 
-    repaired_via: str | None = None
+    parsed1, repaired_via1, parse_err = _parse_with_salvage(raw1, model_name, complete_fn)
+    if parsed1 is None:
+        return _audit_fallback(f"output_parse_failed ({parse_err})")
+
+    addressed = _normalise_addressed(parsed1.get("addressed_concerns"), actionable_ids)
+    out_rm = dict(rm)
+    out_rm["addressed_concerns"] = addressed
+    final_md = md_files
+
+    notes_to_add: list[str] = []
+    if repaired_via1 is not None:
+        notes_to_add.append(
+            f"[synthesis audit pass JSON recovered via {repaired_via1} repair]"
+        )
+
+    # ---- Should we run Call 2? Only if any concern is "incorporated". ----
+    incorporated = [a for a in addressed if a.get("resolution") == "incorporated"]
+    if not incorporated:
+        # Audit done, no revisions implied. Skip Call 2 entirely — both saves
+        # latency and avoids the failure mode the smoke run hit.
+        if notes_to_add:
+            existing = out_rm.get("notes", "")
+            joined = "\n".join(notes_to_add)
+            out_rm["notes"] = f"{existing}\n{joined}".strip() if existing else joined
+        return out_rm, final_md
+
+    # ---- Call 2: revisions ----
     try:
-        parsed = parse_json_object(raw)
-    except (ValueError, json.JSONDecodeError) as exc:
-        parsed = _repair_json_deterministic(raw)
-        if parsed is not None:
-            repaired_via = "deterministic"
-        else:
-            parsed = _repair_json_once(raw, exc, model=model_name,
-                                       complete_fn=complete_fn)
-            if parsed is not None:
-                repaired_via = "reprompt"
-        if parsed is None:
-            return _fallback(f"output_parse_failed ({exc})")
+        raw2 = _run_call(
+            _synthesis_revisions_prompt(rm, md_files, critique, incorporated),
+            model_name, complete_fn,
+        )
+    except Exception as exc:
+        # Audit trail SURVIVES — only the revisions are lost. This is the key
+        # property 0051 adds: Critic concerns + Synthesiser's promised
+        # resolutions remain visible even when the revision call dies.
+        notes_to_add.append(
+            f"[synthesis revisions pass failed: llm_request_failed ({exc}); "
+            "incorporated concerns recorded but rm/md unchanged]"
+        )
+        existing = out_rm.get("notes", "")
+        joined = "\n".join(notes_to_add)
+        out_rm["notes"] = f"{existing}\n{joined}".strip() if existing else joined
+        return out_rm, final_md
 
-    addressed = _normalise_addressed(parsed.get("addressed_concerns"), actionable_ids)
-    final_rm, rm_revised = _apply_revised_rm(rm, parsed.get("revised_risk_matrix"))
-    final_md, md_revised = _apply_revised_md(md_files, parsed.get("revised_markdown_files"))
+    parsed2, repaired_via2, parse_err2 = _parse_with_salvage(raw2, model_name, complete_fn)
+    if parsed2 is None:
+        notes_to_add.append(
+            f"[synthesis revisions pass failed: output_parse_failed ({parse_err2}); "
+            "incorporated concerns recorded but rm/md unchanged]"
+        )
+        existing = out_rm.get("notes", "")
+        joined = "\n".join(notes_to_add)
+        out_rm["notes"] = f"{existing}\n{joined}".strip() if existing else joined
+        return out_rm, final_md
+
+    final_rm, rm_revised = _apply_revised_rm(out_rm, parsed2.get("revised_risk_matrix"))
+    final_md, md_revised = _apply_revised_md(md_files, parsed2.get("revised_markdown_files"))
+    # _apply_revised_rm starts from out_rm (which has addressed_concerns set);
+    # if it returned the draft unchanged, addressed_concerns is already there.
+    # If it returned a revised version, the SKILL contract says the model also
+    # shouldn't have touched addressed_concerns — re-attach defensively.
     final_rm["addressed_concerns"] = addressed
-    # Track which artifacts the final pass actually changed for the audit trail.
     if rm_revised or md_revised:
-        revisions: list[str] = []
+        revisions = []
         if rm_revised:
             revisions.append("risk_matrix")
         revisions.extend(md_revised)
-        existing = final_rm.get("notes", "")
-        rev_note = f"[synthesis final pass revised: {', '.join(revisions)}]"
-        final_rm["notes"] = f"{existing}\n{rev_note}".strip() if existing else rev_note
-    if repaired_via is not None:
-        existing = final_rm.get("notes", "")
-        repair_note = (
-            f"[synthesis final pass JSON recovered via {repaired_via} repair]"
+        notes_to_add.append(
+            f"[synthesis revisions pass applied to: {', '.join(revisions)}]"
         )
-        final_rm["notes"] = (
-            f"{existing}\n{repair_note}".strip() if existing else repair_note
+    if repaired_via2 is not None:
+        notes_to_add.append(
+            f"[synthesis revisions pass JSON recovered via {repaired_via2} repair]"
         )
+    if notes_to_add:
+        existing = final_rm.get("notes", "")
+        joined = "\n".join(notes_to_add)
+        final_rm["notes"] = f"{existing}\n{joined}".strip() if existing else joined
     return final_rm, final_md
 
 
