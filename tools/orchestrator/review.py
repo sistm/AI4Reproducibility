@@ -44,6 +44,7 @@ from tools.orchestrator._stage import (
     parse_json_object,
 )
 from tools.orchestrator.config import model_for
+from tools.orchestrator.critique import run_critique
 from tools.orchestrator.llm import CompleteFn, run_agent
 
 _VERDICTS = {"ACCEPT", "MINOR REVISION", "MAJOR REVISION", "REJECT"}
@@ -545,6 +546,34 @@ def run_review(
         md_note = f"[markdown validation failed for: {failure_list}]"
         existing = rm.get("notes", "")
         rm["notes"] = f"{existing}\n{md_note}".strip() if existing else md_note
+
+    # §5e adversarial Review: run the Critic against the in-memory draft to
+    # surface epistemic gaps (evidence_gap, over_charitable, under_charitable,
+    # internal_inconsistency, missing_upstream_signal). The Critic writes
+    # ``critique.json`` next to the Review artifacts. In this patch the
+    # critique runs but does NOT modify the verdict or markdown — patch 0047
+    # adds the Synthesiser final pass that consumes critique to revise the
+    # draft. For now ``critique.json`` is an auxiliary artifact a human reader
+    # can consult alongside the verdict.
+    critique = run_critique(
+        review_title,
+        upstream={"kbe": kbe or {}, "cqv": cqv or {}},
+        draft={"risk_matrix": rm, "md_files": md_files},
+        root=Path(root),
+        complete_fn=complete_fn,
+        model_name=model,
+    )
+    if critique.get("status") == "failed":
+        # Critic could not produce a verdict (transport, parse, or repair-chain
+        # exhaustion). Surface this in rm.notes so a reader knows the verdict
+        # is unaudited. Does NOT degrade assessment_status — the draft quality
+        # didn't change, only the adversarial pass did.
+        crit_note = (
+            f"[critique stage failed: {critique['failure_mode']}; "
+            "verdict reflects draft only]"
+        )
+        existing = rm.get("notes", "")
+        rm["notes"] = f"{existing}\n{crit_note}".strip() if existing else crit_note
 
     _write_review(review_dir, rm, md_files)
     return rm

@@ -61,11 +61,25 @@ _GOOD_MD = (
 )
 
 
-def _backend(core: str = GOOD_CORE, md: str = _GOOD_MD):
+# Default critique response: no_concerns (positive endorsement). Tests that
+# need a specific critique payload override via the `critique=` parameter.
+_GOOD_CRITIQUE = '{"status": "no_concerns", "concerns": []}'
+
+
+def _backend(
+    core: str = GOOD_CORE,
+    md: str = _GOOD_MD,
+    critique: str = _GOOD_CRITIQUE,
+):
     def b(model, messages, tools):
         u = messages[-1]["content"]
+        # Critic prompt has its own fingerprint: rubric injection + draft tags.
+        if "<draft_risk_matrix>" in u:
+            return LLMResponse(text=critique)
+        # Risk-matrix core call: the only one asking for risk_score JSON.
         if '"risk_score"' in u and "Return ONLY" in u:
             return LLMResponse(text=core)
+        # Markdown calls (final_review, checklist, exhaustive_audit_report).
         return LLMResponse(text=md)
 
     return b
@@ -626,3 +640,101 @@ def test_md_prompt_includes_anti_fence_instruction():
     for p in (md, cl):
         assert "Do NOT wrap" in p
         assert "```markdown" in p  # explicitly names the fence to avoid
+
+
+# --- Critic integration (patch 0046) -----------------------------------------
+
+
+def test_critic_runs_on_success_path_writes_critique_json(tmp_path):
+    """Happy path: run_review invokes Critic; critique.json on disk."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    rm = run_review("p", root=tmp_path, complete_fn=_backend())
+    assert rm["assessment_status"] == "complete"
+    cj_path = tmp_path / "ai4r" / "p" / "review" / "critique.json"
+    assert cj_path.is_file()
+    cj = json.loads(cj_path.read_text())
+    assert cj["status"] == "no_concerns"
+    assert cj["paper_id"] == "p"
+
+
+def test_critic_concerns_are_persisted_but_do_not_change_verdict(tmp_path):
+    """0046 contract: Critic surfaces concerns but does not modify rm."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    crit_payload = json.dumps({
+        "status": "complete",
+        "concerns": [{
+            "id": "K1",
+            "category": "evidence_gap",
+            "severity": "blocking",
+            "draft_claim": "Critical: missing data files.",
+            "concern": "Evidence cite is too generic.",
+            "evidence_refs": ["ai4r/p/review/risk_matrix.json#/issues/critical/0"],
+            "suggested_action": "Narrow cite to file:line.",
+        }],
+    })
+    rm = run_review("p", root=tmp_path, complete_fn=_backend(critique=crit_payload))
+    # rm itself is unchanged: same verdict as the GOOD_CORE fixture.
+    assert rm["verdict"] == "MINOR REVISION"
+    assert rm["assessment_status"] == "complete"
+    # Critique persisted with the blocking concern intact.
+    cj = json.loads((tmp_path / "ai4r" / "p" / "review" / "critique.json").read_text())
+    assert cj["status"] == "complete"
+    assert len(cj["concerns"]) == 1
+    assert cj["concerns"][0]["severity"] == "blocking"
+
+
+def test_critic_failure_is_noted_but_not_fatal(tmp_path):
+    """Critic transport failure -> note in rm, assessment_status unchanged."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+
+    # Backend that succeeds on review calls but raises on the Critic call.
+    def selective(model, messages, tools):
+        u = messages[-1]["content"]
+        if "<draft_risk_matrix>" in u:
+            raise RuntimeError("critic gateway down")
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        return LLMResponse(text=_GOOD_MD)
+
+    rm = run_review("p", root=tmp_path, complete_fn=selective)
+    assert rm["assessment_status"] == "complete"  # NOT degraded
+    assert "critique stage failed" in rm["notes"]
+    assert "llm_request_failed" in rm["notes"]
+    # critique.json exists with failed status (run_critique always writes)
+    cj = json.loads((tmp_path / "ai4r" / "p" / "review" / "critique.json").read_text())
+    assert cj["status"] == "failed"
+    assert cj["failure_mode"] == "llm_request_failed"
+
+
+def test_critic_receives_upstream_and_draft(tmp_path):
+    """Sanity-check the Critic prompt was actually given upstream + draft."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    seen = {"critique_prompt": None}
+
+    def capture(model, messages, tools):
+        u = messages[-1]["content"]
+        if "<draft_risk_matrix>" in u:
+            seen["critique_prompt"] = u
+            return LLMResponse(text='{"status": "no_concerns", "concerns": []}')
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        return LLMResponse(text=_GOOD_MD)
+
+    run_review("p", root=tmp_path, complete_fn=capture)
+    p = seen["critique_prompt"]
+    assert p is not None
+    # Both upstream blocks and all three draft md blocks present in the prompt.
+    for tag in ("<upstream_kbe>", "<upstream_cqv>", "<draft_risk_matrix>",
+                "<draft_final_review>", "<draft_checklist>",
+                "<draft_exhaustive_audit_report>"):
+        assert tag in p, f"missing {tag} in critique prompt"
+
+
+def test_critic_does_not_run_on_all_upstream_failed(tmp_path):
+    """Early-exit failure paths skip the Critic; no critique.json written."""
+    _seed(tmp_path, "p", {"status": "failed"}, {"status": "failed"})
+    rm = run_review("p", root=tmp_path, complete_fn=_backend())
+    assert rm["assessment_status"] == "failed"
+    assert rm["failure_mode"] == "all_upstream_failed"
+    cj_path = tmp_path / "ai4r" / "p" / "review" / "critique.json"
+    assert not cj_path.exists()  # Critic skipped on hard-fail
