@@ -62,7 +62,148 @@ _SECURITY_NOTICE = (
 )
 
 
-def _critique_prompt(upstream: dict[str, Any], draft: dict[str, Any]) -> str:
+# --- Evidence-anchor verification (patch 0050) -------------------------------
+#
+# Without this, the Critic was fooled by two failure modes observed in the
+# bimj_202400278 smoke run:
+#   1. The draft cited evidence at file:line that didn't exist (``#L46`` in a
+#      6-line file).
+#   2. The draft cited ``kbe_output.json#L1`` for every KBE-derived issue —
+#      line 1 is just ``{``, so the anchor is meaningless.
+#   3. The Critic itself produced concerns whose ``evidence_refs`` pointed at
+#      named anchors that didn't appear anywhere in the cited file.
+#
+# Two places use the resolver: ``_audit_draft_evidence`` injects a programmatic
+# audit of the draft's cites into the Critic prompt (so the Critic can ground
+# evidence_gap concerns in fact, not opinion), and ``_filter_critic_refs``
+# drops broken refs from the Critic's own output (so the Critic's audit trail
+# doesn't itself contain broken cites). The resolver is intentionally
+# conservative — it catches the egregious cases without trying to parse
+# markdown headings or JSON pointers semantically.
+
+
+def _resolve_evidence_ref(ref: str, root: Path) -> tuple[str, str | None]:
+    """Resolve an evidence ref against the on-disk workspace.
+
+    Returns ``(status, detail)`` where status is one of:
+
+    * ``ok``       — file exists; any anchor present resolved or wasn't checked.
+    * ``broken``   — file missing, or ``#L<n>`` beyond EOF, or named anchor not
+                     found as a substring in a markdown/text file.
+    * ``imprecise``— ``.json`` file cited with ``#L<n>`` — line numbers in JSON
+                     files aren't semantically meaningful (line 1 is often just
+                     ``{``); flagged as a soft warning rather than broken.
+    * ``skip``     — ref doesn't start with ``ai4r/`` or points at an
+                     in-memory ``draft_*`` tag — out of scope for verification.
+
+    Conservative on purpose: a passing ``ok`` means "we couldn't disprove it",
+    not "we verified it semantically".
+    """
+    if not isinstance(ref, str) or not ref.startswith("ai4r/"):
+        return ("skip", None)
+    path_part, _, anchor = ref.partition("#")
+    final_segment = path_part.rsplit("/", 1)[-1]
+    if final_segment.startswith("draft_"):
+        return ("skip", None)
+    file_path = root / path_part
+    if not file_path.is_file():
+        return ("broken", f"file does not exist: {path_part}")
+    if not anchor:
+        return ("ok", None)
+    # ``#L<n>`` line-number anchor: count lines and check the bound.
+    if anchor.startswith("L") and anchor[1:].isdigit():
+        line_no = int(anchor[1:])
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ("broken", f"file unreadable: {path_part}")
+        num_lines = content.count("\n") + (0 if content.endswith("\n") else 1)
+        if line_no > num_lines or line_no < 1:
+            return ("broken",
+                    f"line {line_no} beyond file extent ({num_lines} lines)")
+        if file_path.suffix == ".json":
+            return ("imprecise",
+                    "JSON file cited with line number — JSON line numbers are "
+                    "not semantic; prefer a path-style anchor")
+        return ("ok", None)
+    # Named anchor (e.g. ``#cqv-stat-multiple-testing``).
+    # JSON files: skip — without a JSON-pointer parser we can't reliably
+    # validate keys/indices. Markdown/text: substring check; catches the
+    # egregious case where the anchor name doesn't appear at all.
+    if file_path.suffix == ".json":
+        return ("ok", None)
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ("broken", f"file unreadable: {path_part}")
+    if anchor not in content:
+        return ("broken", f"named anchor not found in file: #{anchor}")
+    return ("ok", None)
+
+
+def _audit_draft_evidence(draft: dict[str, Any], root: Path) -> list[str]:
+    """Walk the draft's evidence cites; return one human-readable line per issue.
+
+    Each issue in the draft's ``risk_matrix.issues.<severity>`` is checked.
+    Lines look like ``- C1: ai4r/.../repo_analysis.md#L46 — file has 5 lines``.
+    The Critic prompt embeds the list verbatim so the model can ground
+    evidence_gap concerns in concrete file-system facts.
+    """
+    rm = draft.get("risk_matrix") or {}
+    issues_block = rm.get("issues") or {}
+    out: list[str] = []
+    for severity in ("critical", "major", "minor", "suggestions"):
+        for entry in issues_block.get(severity, []) or []:
+            if not isinstance(entry, dict):
+                continue
+            cid = entry.get("id", "?")
+            ev = entry.get("evidence")
+            if not isinstance(ev, str):
+                continue
+            status, detail = _resolve_evidence_ref(ev, root)
+            if status in ("broken", "imprecise") and detail:
+                out.append(f"- {cid}: {ev} — {detail}")
+    return out
+
+
+def _filter_critic_refs(
+    concerns: list[dict[str, Any]], root: Path
+) -> list[dict[str, Any]]:
+    """Drop broken refs from each concern's ``evidence_refs``; record what was dropped.
+
+    Non-destructive: keeps the concern, drops only the broken ref(s), adds a
+    ``ref_audit`` field listing what fell. Re-applies the SKILL rule that
+    ``blocking`` concerns need at least one ref + an action — a blocking
+    concern whose refs all got dropped downgrades to ``material`` so the
+    audit trail records the issue while still meeting the rule.
+    """
+    out: list[dict[str, Any]] = []
+    for c in concerns:
+        if not isinstance(c, dict):
+            continue
+        kept: list[str] = []
+        dropped: list[dict[str, str]] = []
+        for ref in c.get("evidence_refs", []) or []:
+            status, detail = _resolve_evidence_ref(ref, root)
+            if status == "broken":
+                dropped.append({"ref": ref, "reason": detail or "unresolvable"})
+            else:
+                kept.append(ref)
+        new_c = {**c, "evidence_refs": kept}
+        if dropped:
+            new_c["ref_audit"] = {"dropped": dropped}
+        if new_c.get("severity") == "blocking" and not kept:
+            # SKILL rule re-application: blocking needs refs.
+            new_c["severity"] = "material"
+        out.append(new_c)
+    return out
+
+
+def _critique_prompt(
+    upstream: dict[str, Any],
+    draft: dict[str, Any],
+    root: Path | None = None,
+) -> str:
     """Build the single-call Critic prompt with rubric injected verbatim.
 
     The five-category rubric (with positive/negative examples) is loaded from
@@ -79,6 +220,21 @@ def _critique_prompt(upstream: dict[str, Any], draft: dict[str, Any]) -> str:
     fr = md_files.get("final_review.md", "")
     cl = md_files.get("checklist.md", "")
     ear = md_files.get("exhaustive_audit_report.md", "")
+    # Pre-check the draft's evidence cites against the on-disk workspace
+    # (patch 0050). The audit block is a deterministic fact-stream the Critic
+    # can ground evidence_gap concerns in. Empty when the draft cites resolve
+    # cleanly OR when no workspace root was supplied (e.g. unit tests of the
+    # prompt builder itself).
+    audit = _audit_draft_evidence(draft, root) if root is not None else []
+    audit_block = (
+        "<draft_evidence_audit>\n"
+        "Programmatic check of the draft's evidence cites flagged the "
+        "following issues — these are factual statements about file "
+        "contents, not opinion. Use them to ground evidence_gap concerns "
+        "rather than re-deriving them from the draft text:\n"
+        + "\n".join(audit)
+        + "\n</draft_evidence_audit>\n\n"
+    ) if audit else ""
     return (
         f"{_SECURITY_NOTICE}\n\n"
         "You are the Critic. Your job is to read the Synthesiser's draft "
@@ -92,6 +248,7 @@ def _critique_prompt(upstream: dict[str, Any], draft: dict[str, Any]) -> str:
         f"<draft_final_review>\n{fr}\n</draft_final_review>\n\n"
         f"<draft_checklist>\n{cl}\n</draft_checklist>\n\n"
         f"<draft_exhaustive_audit_report>\n{ear}\n</draft_exhaustive_audit_report>\n\n"
+        f"{audit_block}"
         "---\n\n"
         f"## Categories rubric\n\n{rubric}\n\n"
         "---\n\n"
@@ -259,7 +416,7 @@ def run_critique(
     model = model_name or model_for("critique")
 
     try:
-        raw = _run_call(_critique_prompt(upstream, draft), model, complete_fn)
+        raw = _run_call(_critique_prompt(upstream, draft, root), model, complete_fn)
     except Exception as exc:  # LLM transport failure
         out = _failed(review_title, "llm_request_failed", f"Critique LLM call failed: {exc}")
         _write(review_dir, out)
@@ -290,6 +447,12 @@ def run_critique(
             return out
 
     out = _normalise(parsed, review_title)
+    # Patch 0050: validate the Critic's own evidence_refs against the on-disk
+    # workspace. Drops broken refs, records what was dropped under
+    # ``ref_audit``, downgrades blocking concerns that lose all refs to
+    # material (mirrors the SKILL rule). Non-destructive — concerns stay even
+    # if all their refs were bad, so the audit trail is observable.
+    out["concerns"] = _filter_critic_refs(out["concerns"], root)
     if repaired_via is not None:
         # Salvaged output is lower-confidence; flag and retain raw for verification.
         out["failure_mode"] = "output_recovered_by_repair"

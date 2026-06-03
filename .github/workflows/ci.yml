@@ -66,6 +66,18 @@ jobs:
         run: |
           pip install -e ".[dev]"
 
+      # GitHub's ubuntu-latest hosted runner ships with pdfminer.six already
+      # installed in the Python image, so `pip install -e .[dev]` alone does
+      # NOT give a minimal environment — the verify step below would fail and
+      # the test suite would unexpectedly exercise the pdf path. Uninstalling
+      # explicitly is robust to future hosted-runner image changes too:
+      # whatever the runner pre-installs, we strip down to the documented
+      # [dev]-only set before checking. ``-y`` with missing packages prints a
+      # warning and exits 0, so the step is idempotent.
+      - name: Strip optional deps preinstalled in the runner image
+        run: |
+          pip uninstall -y pdfminer.six pdfminer json_repair litellm
+
       - name: Verify optional deps are actually absent
         run: |
           python -c "import importlib.util, sys; \

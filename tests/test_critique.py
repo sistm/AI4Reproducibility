@@ -347,3 +347,200 @@ def test_prompt_excludes_orchestrator_owned_fields():
     prompt = _critique_prompt(_upstream(), _draft())
     assert "Do NOT include paper_id" in prompt
     assert "critique_timestamp" in prompt
+
+
+# --- Evidence-anchor verification (patch 0050) -------------------------------
+
+
+def test_resolver_skips_non_ai4r_refs(tmp_path):
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    assert _resolve_evidence_ref("not-an-ai4r-ref", tmp_path) == ("skip", None)
+    assert _resolve_evidence_ref("https://example.com/foo", tmp_path) == ("skip", None)
+
+
+def test_resolver_skips_draft_virtual_paths(tmp_path):
+    """In-memory ``draft_*`` tags don't correspond to on-disk files."""
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    status, _ = _resolve_evidence_ref("ai4r/p/draft_risk_matrix.json#verdict", tmp_path)
+    assert status == "skip"
+
+
+def test_resolver_file_missing(tmp_path):
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    status, detail = _resolve_evidence_ref("ai4r/p/cqv/nope.md", tmp_path)
+    assert status == "broken"
+    assert "does not exist" in detail
+
+
+def test_resolver_line_in_range(tmp_path):
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    p = tmp_path / "ai4r" / "p" / "cqv"
+    p.mkdir(parents=True)
+    (p / "f.md").write_text("a\nb\nc\nd\ne\n")
+    assert _resolve_evidence_ref("ai4r/p/cqv/f.md#L3", tmp_path) == ("ok", None)
+
+
+def test_resolver_line_beyond_eof(tmp_path):
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    p = tmp_path / "ai4r" / "p" / "cqv"
+    p.mkdir(parents=True)
+    (p / "f.md").write_text("only\ntwo lines\n")
+    status, detail = _resolve_evidence_ref("ai4r/p/cqv/f.md#L46", tmp_path)
+    assert status == "broken"
+    assert "beyond file extent" in detail
+
+
+def test_resolver_json_line_anchor_is_imprecise(tmp_path):
+    """JSON #L<n> cites are imprecise — JSON line numbers aren't semantic."""
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    p = tmp_path / "ai4r" / "p" / "kbe"
+    p.mkdir(parents=True)
+    (p / "kbe_output.json").write_text('{"a": 1}\n')
+    status, detail = _resolve_evidence_ref("ai4r/p/kbe/kbe_output.json#L1", tmp_path)
+    assert status == "imprecise"
+    assert "JSON" in detail
+
+
+def test_resolver_named_anchor_in_markdown_found(tmp_path):
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    p = tmp_path / "ai4r" / "p" / "cqv"
+    p.mkdir(parents=True)
+    (p / "f.md").write_text("# Audit\n\nstat-cqv-multiple-testing fired here.\n")
+    assert _resolve_evidence_ref("ai4r/p/cqv/f.md#stat-cqv-multiple-testing",
+                                   tmp_path) == ("ok", None)
+
+
+def test_resolver_named_anchor_in_markdown_missing(tmp_path):
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    p = tmp_path / "ai4r" / "p" / "cqv"
+    p.mkdir(parents=True)
+    (p / "f.md").write_text("# Audit\n\nNothing relevant here.\n")
+    status, detail = _resolve_evidence_ref("ai4r/p/cqv/f.md#STAT-foo", tmp_path)
+    assert status == "broken"
+    assert "named anchor not found" in detail
+
+
+def test_resolver_named_anchor_in_json_unverified(tmp_path):
+    """JSON named anchors / pointers — skipped (can't validate without parser)."""
+    from tools.orchestrator.critique import _resolve_evidence_ref
+    p = tmp_path / "ai4r" / "p" / "kbe"
+    p.mkdir(parents=True)
+    (p / "kbe_output.json").write_text('{"a": 1}\n')
+    # Anchor name doesn't appear in file, but we accept it for JSON.
+    assert _resolve_evidence_ref("ai4r/p/kbe/kbe_output.json#identified_assumptions[6]",
+                                   tmp_path) == ("ok", None)
+
+
+def test_audit_draft_evidence_flags_broken_and_imprecise(tmp_path):
+    """End-to-end audit walks rm.issues and surfaces both broken and imprecise refs."""
+    from tools.orchestrator.critique import _audit_draft_evidence
+    (tmp_path / "ai4r" / "p" / "cqv").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "cqv" / "repo_analysis.md").write_text("# CQV failure\n\n- mode: None\n")
+    (tmp_path / "ai4r" / "p" / "kbe").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "kbe" / "kbe_output.json").write_text('{"a":1}\n')
+    draft = {"risk_matrix": {"issues": {
+        "critical": [{"id": "C1", "description": "x",
+                      "evidence": "ai4r/p/cqv/repo_analysis.md#L46"}],
+        "major": [{"id": "M1", "description": "y",
+                   "evidence": "ai4r/p/kbe/kbe_output.json#L1"}],
+        "minor": [{"id": "m1", "description": "z",
+                   "evidence": "ai4r/p/cqv/repo_analysis.md#mode"}],
+        "suggestions": [],
+    }}}
+    audit = _audit_draft_evidence(draft, tmp_path)
+    # C1 broken (line 46 beyond EOF), M1 imprecise (json line cite),
+    # m1 ok ("mode" appears in file content).
+    assert any("C1" in line and "beyond file extent" in line for line in audit)
+    assert any("M1" in line and "JSON" in line for line in audit)
+    assert not any("m1" in line for line in audit)
+
+
+def test_filter_critic_refs_drops_broken_and_records_audit(tmp_path):
+    from tools.orchestrator.critique import _filter_critic_refs
+    (tmp_path / "ai4r" / "p" / "cqv").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "cqv" / "good.json").write_text("{}")
+    concerns = [{
+        "id": "K1", "category": "evidence_gap", "severity": "material",
+        "draft_claim": "x", "concern": "y",
+        "evidence_refs": ["ai4r/p/cqv/good.json", "ai4r/p/cqv/missing.md"],
+        "suggested_action": "z",
+    }]
+    out = _filter_critic_refs(concerns, tmp_path)
+    assert out[0]["evidence_refs"] == ["ai4r/p/cqv/good.json"]
+    assert out[0]["ref_audit"]["dropped"][0]["ref"] == "ai4r/p/cqv/missing.md"
+
+
+def test_filter_critic_refs_downgrades_blocking_with_no_kept_refs(tmp_path):
+    from tools.orchestrator.critique import _filter_critic_refs
+    concerns = [{
+        "id": "K1", "category": "evidence_gap", "severity": "blocking",
+        "draft_claim": "x", "concern": "y",
+        "evidence_refs": ["ai4r/p/cqv/missing.md"],
+        "suggested_action": "z",
+    }]
+    out = _filter_critic_refs(concerns, tmp_path)
+    assert out[0]["severity"] == "material"  # downgraded
+    assert out[0]["evidence_refs"] == []
+    assert "ref_audit" in out[0]
+
+
+def test_filter_critic_refs_preserves_concern_with_no_refs(tmp_path):
+    """A concern with zero evidence_refs to start passes through unchanged."""
+    from tools.orchestrator.critique import _filter_critic_refs
+    concerns = [{
+        "id": "K1", "category": "evidence_gap", "severity": "advisory",
+        "draft_claim": "x", "concern": "y", "evidence_refs": [],
+        "suggested_action": "z",
+    }]
+    out = _filter_critic_refs(concerns, tmp_path)
+    assert out[0]["severity"] == "advisory"
+    assert "ref_audit" not in out[0]
+
+
+def test_critique_prompt_includes_audit_block_when_draft_evidence_broken(tmp_path):
+    """End-to-end: a broken draft cite shows up in the Critic prompt's audit block."""
+    from tools.orchestrator.critique import _critique_prompt
+    (tmp_path / "ai4r" / "p" / "cqv").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "cqv" / "repo_analysis.md").write_text("# CQV\n\nshort.\n")
+    draft = {"risk_matrix": {"issues": {
+        "critical": [{"id": "C1", "description": "x",
+                      "evidence": "ai4r/p/cqv/repo_analysis.md#L99"}],
+        "major": [], "minor": [], "suggestions": [],
+    }}, "md_files": {}}
+    prompt = _critique_prompt({"kbe": {}, "cqv": {}}, draft, root=tmp_path)
+    assert "<draft_evidence_audit>" in prompt
+    assert "C1" in prompt
+    assert "beyond file extent" in prompt
+
+
+def test_critique_prompt_omits_audit_block_when_no_broken_refs(tmp_path):
+    """No audit block when all draft refs resolve cleanly."""
+    from tools.orchestrator.critique import _critique_prompt
+    (tmp_path / "ai4r" / "p" / "cqv").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "cqv" / "ok.md").write_text("a\nb\nc\n")
+    draft = {"risk_matrix": {"issues": {
+        "critical": [{"id": "C1", "description": "x", "evidence": "ai4r/p/cqv/ok.md#L2"}],
+        "major": [], "minor": [], "suggestions": [],
+    }}, "md_files": {}}
+    prompt = _critique_prompt({"kbe": {}, "cqv": {}}, draft, root=tmp_path)
+    assert "<draft_evidence_audit>" not in prompt
+
+
+def test_run_critique_filters_critic_refs_end_to_end(tmp_path):
+    """A Critic that cites a missing file: ref dropped from output, ref_audit appears."""
+    (tmp_path / "ai4r" / "p" / "kbe").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "kbe" / "kbe_output.json").write_text('{}')
+    payload = json.dumps({
+        "status": "complete",
+        "concerns": [{
+            "id": "K1", "category": "evidence_gap", "severity": "material",
+            "draft_claim": "x", "concern": "y",
+            "evidence_refs": ["ai4r/p/kbe/kbe_output.json", "ai4r/p/cqv/nonexistent.md"],
+            "suggested_action": "z",
+        }],
+    })
+    out = run_critique("p", upstream=_upstream(), draft=_draft(),
+                       root=tmp_path, complete_fn=_backend(payload))
+    concern = out["concerns"][0]
+    assert concern["evidence_refs"] == ["ai4r/p/kbe/kbe_output.json"]
+    assert concern["ref_audit"]["dropped"][0]["ref"] == "ai4r/p/cqv/nonexistent.md"

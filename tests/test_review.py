@@ -682,7 +682,11 @@ def test_critic_concerns_are_persisted_but_do_not_change_verdict(tmp_path):
             "severity": "blocking",
             "draft_claim": "Critical: missing data files.",
             "concern": "Evidence cite is too generic.",
-            "evidence_refs": ["ai4r/p/review/risk_matrix.json#/issues/critical/0"],
+            # Ref must point at a file that exists on disk at the moment the
+            # Critic runs — patch 0050 filters broken refs and downgrades any
+            # blocking concern that loses them all. ``_seed`` writes
+            # cqv_output.json.
+            "evidence_refs": ["ai4r/p/cqv/cqv_output.json"],
             "suggested_action": "Narrow cite to file:line.",
         }],
     })
@@ -768,7 +772,7 @@ _CONCERN_BLOCKING = {
     "severity": "blocking",
     "draft_claim": "Critical: missing data.",
     "concern": "Evidence too generic.",
-    "evidence_refs": ["ai4r/p/cqv/repo_analysis.md"],
+    "evidence_refs": ["ai4r/p/cqv/cqv_output.json"],
     "suggested_action": "Cite file:line.",
 }
 _CONCERN_MATERIAL = {**_CONCERN_BLOCKING, "id": "K2", "severity": "material"}
