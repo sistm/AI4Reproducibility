@@ -46,6 +46,7 @@ from tools.orchestrator._stage import (
 from tools.orchestrator.config import model_for
 from tools.orchestrator.critique import run_critique
 from tools.orchestrator.llm import CompleteFn, run_agent
+from tools.orchestrator.reconcile import reconcile_review, snapshot_draft
 
 _VERDICTS = {"ACCEPT", "MINOR REVISION", "MAJOR REVISION", "REJECT"}
 _RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
@@ -924,6 +925,12 @@ def run_review(
     # surface epistemic gaps (evidence_gap, over_charitable, under_charitable,
     # internal_inconsistency, missing_upstream_signal). The Critic writes
     # ``critique.json`` next to the Review artifacts.
+    # Snapshot draft state BEFORE the Critic + Synthesiser loop runs, so the
+    # reconciliation step (patch 0053) can tell whether any "incorporated"
+    # claims correspond to actual diffs. Must be a deep copy — Synthesiser
+    # revisions mutate nested issue lists in place.
+    draft_snapshot = snapshot_draft(rm, md_files)
+
     critique = run_critique(
         review_title,
         upstream={"kbe": kbe or {}, "cqv": cqv or {}},
@@ -960,6 +967,12 @@ def run_review(
             rm, md_files = _run_synthesis_final(
                 rm, md_files, critique, model_name, complete_fn
             )
+
+    # Reconciliation (patch 0053): deterministic last-line check. Verifies the
+    # final rm + md_files are internally consistent and that any "incorporated"
+    # claims correspond to actual diffs. May mutate rm/md or degrade
+    # assessment_status. Never raises.
+    rm, md_files = reconcile_review(rm, md_files, draft_snapshot)
 
     _write_review(review_dir, rm, md_files)
     return rm

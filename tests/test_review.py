@@ -214,9 +214,11 @@ def test_risk_core_reprompt_repair_recovers(tmp_path, monkeypatch):
     from tools.orchestrator import review as review_mod
 
     _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
-    malformed = '{"risk_score": 40, "verdict": "REJECT" oops'
+    malformed = '{"risk_score": 40, "verdict": "MINOR REVISION" oops'
+    # Verdict matches _GOOD_MD's text so reconciliation (patch 0053, Invariant 1)
+    # doesn't flag rm/md mismatch — this test exercises the salvage chain only.
     repaired = {
-        "risk_score": 40, "risk_level": "MEDIUM", "verdict": "REJECT",
+        "risk_score": 40, "risk_level": "MEDIUM", "verdict": "MINOR REVISION",
         "issues": {"critical": [], "major": [], "minor": [], "suggestions": []},
         "required_changes": [],
     }
@@ -228,7 +230,7 @@ def test_risk_core_reprompt_repair_recovers(tmp_path, monkeypatch):
     rm = run_review("p", root=tmp_path, complete_fn=_backend(core=malformed))
     assert rm["assessment_status"] == "complete"
     assert rm["failure_mode"] == "output_recovered_by_repair"
-    assert rm["verdict"] == "REJECT"
+    assert rm["verdict"] == "MINOR REVISION"
     assert rm["raw_model_output"] == malformed
     assert "reprompt" in rm["notes"]
 
@@ -844,9 +846,13 @@ def test_final_pass_runs_on_blocking_concern(tmp_path):
 
 
 def test_final_pass_honours_model_supplied_resolutions(tmp_path):
-    """When Synthesiser emits explicit resolutions, they win over auto-deferral."""
+    """When Synthesiser emits explicit resolutions, they win over auto-deferral.
+
+    Includes an actual rm revision so reconciliation (Invariant 2, 0053) does
+    not downgrade the 'incorporated' resolution for lack of a diff.
+    """
     _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
-    # Patch 0051: audit response is the standalone Call 1; no rm/md changes.
+    # Patch 0051: audit response is the standalone Call 1.
     audit_response = json.dumps({
         "addressed_concerns": [
             {"id": "K1", "resolution": "incorporated",
@@ -855,9 +861,24 @@ def test_final_pass_honours_model_supplied_resolutions(tmp_path):
              "reason": "Draft already cites the specific line."},
         ],
     })
+    # Patch 0053: an incorporated claim needs a real diff to survive
+    # reconciliation. Provide a small rm tweak in the revisions response.
+    revisions_response = json.dumps({
+        "revised_risk_matrix": {
+            **{k: v for k, v in json.loads(GOOD_CORE).items()},
+            "verdict": "MINOR REVISION",  # same as draft but represents a "decision"
+            "risk_score": 35,  # changed from 30 in GOOD_CORE -> real diff
+            "paper_id": "p", "paper_title": "T",
+            "assessed_at": "2024-01-01T00:00:00Z", "upstream_status": {},
+            "assessment_status": "complete",
+        },
+        "revised_markdown_files": None,
+    })
     crit = _critique_with([_CONCERN_BLOCKING, _CONCERN_MATERIAL])
     rm = run_review("p", root=tmp_path,
-                    complete_fn=_backend(critique=crit, synth_audit=audit_response))
+                    complete_fn=_backend(critique=crit,
+                                         synth_audit=audit_response,
+                                         synth_revisions=revisions_response))
     by_id = {a["id"]: a for a in rm["addressed_concerns"]}
     assert by_id["K1"]["resolution"] == "incorporated"
     assert by_id["K2"]["resolution"] == "refuted"
@@ -905,7 +926,13 @@ def test_final_pass_revises_risk_matrix_when_emitted(tmp_path):
 
 
 def test_final_pass_partial_rm_rejected(tmp_path):
-    """An rm revision missing required keys is rejected; draft stands."""
+    """An rm revision missing required keys is rejected; draft stands.
+
+    Because the draft stands (no diff), reconciliation (patch 0053
+    Invariant 2) honestly downgrades the 'incorporated' claim to
+    'deferred' — the Synthesiser said it would change something but did
+    not.
+    """
     _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
     audit_response = json.dumps({
         "addressed_concerns": [{"id": "K1", "resolution": "incorporated",
@@ -922,8 +949,9 @@ def test_final_pass_partial_rm_rejected(tmp_path):
                                          synth_revisions=revisions_response))
     # Draft preserved: still MINOR REVISION from GOOD_CORE fixture
     assert rm["verdict"] == "MINOR REVISION"
-    # Synthesiser's addressed_concerns still applied
-    assert rm["addressed_concerns"][0]["resolution"] == "incorporated"
+    # Reconciliation downgrades the unfulfilled 'incorporated' claim:
+    assert rm["addressed_concerns"][0]["resolution"] == "deferred"
+    assert "no diff against the draft" in rm["addressed_concerns"][0]["reason"]
 
 
 def test_final_pass_revises_markdown_files_when_emitted(tmp_path):
@@ -1027,9 +1055,11 @@ def test_final_pass_parse_failure_falls_back_to_draft(tmp_path, monkeypatch):
 def test_revisions_call_failure_preserves_audit_trail(tmp_path):
     """Patch 0051: Call 2 transport failure -> audit persists, no revisions.
 
-    The key property added by 0051: when the revisions pass dies, the
-    addressed_concerns audit trail from Call 1 still survives. Pre-0051 the
-    single-call architecture would have lost everything.
+    With patch 0053 layered on top: incorporated claims without an actual
+    diff get honestly downgraded to deferred by reconciliation. The audit
+    trail still persists (K1/K2 still appear in addressed_concerns) but the
+    resolutions reflect reality: incorporated -> deferred ("no diff"),
+    refuted stays as the Synthesiser's explicit decision.
     """
     _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
     audit_response = json.dumps({
@@ -1054,13 +1084,16 @@ def test_revisions_call_failure_preserves_audit_trail(tmp_path):
         return LLMResponse(text=_GOOD_MD)
 
     rm = run_review("p", root=tmp_path, complete_fn=two_call_selective)
-    # Audit survived: explicit resolutions from Call 1 still present, NOT auto-deferred.
     by_id = {a["id"]: a for a in rm["addressed_concerns"]}
-    assert by_id["K1"]["resolution"] == "incorporated"
+    # K1's incorporated claim went unfulfilled (revisions died) -> reconciliation
+    # downgrades it to deferred with an honest reason.
+    assert by_id["K1"]["resolution"] == "deferred"
+    assert "no diff" in by_id["K1"]["reason"]
+    # K2's refuted resolution was an explicit Synthesiser decision; preserved.
     assert by_id["K2"]["resolution"] == "refuted"
-    # Note records WHICH pass died.
+    # Two notes now: synthesis-call-failure + reconciliation downgrade.
     assert "synthesis revisions pass failed" in rm["notes"]
-    assert "incorporated concerns recorded but rm/md unchanged" in rm["notes"]
+    assert "reconciliation" in rm["notes"]
     # Draft rm/md unchanged.
     assert rm["verdict"] == "MINOR REVISION"
 
@@ -1165,3 +1198,67 @@ def test_synthesis_revisions_prompt_carries_style_discipline():
     assert "hedging" in p.lower()
     assert "concrete action" in p
     assert "issue ID" in p
+
+
+# --- Reconciliation end-to-end (patch 0053) -----------------------------------
+
+
+def test_reconciliation_degrades_on_verdict_mismatch_end_to_end(tmp_path):
+    """The bimj_202400278 failure mode: rm.verdict != final_review.md verdict.
+
+    Synthesiser audit + revisions cooperate to produce an rm with verdict
+    MAJOR while final_review.md still carries the draft's MINOR verdict.
+    Reconciliation catches the inconsistency and refuses to ship green.
+    """
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+
+    # Audit incorporates K1, intending to escalate the verdict.
+    audit_response = json.dumps({
+        "addressed_concerns": [
+            {"id": "K1", "resolution": "incorporated",
+             "reason": "Escalating verdict to MAJOR per blocking concern."},
+        ],
+    })
+    # Revisions produces a new rm with verdict=MAJOR but does NOT update md.
+    revised_rm = {
+        **json.loads(GOOD_CORE),
+        "verdict": "MAJOR REVISION",
+        "paper_id": "p", "paper_title": "T",
+        "assessed_at": "2024-01-01T00:00:00Z", "upstream_status": {},
+        "assessment_status": "complete",
+    }
+    revisions_response = json.dumps({
+        "revised_risk_matrix": revised_rm,
+        "revised_markdown_files": None,  # md stays at draft (MINOR REVISION via _GOOD_MD)
+    })
+
+    rm = run_review("p", root=tmp_path,
+                    complete_fn=_backend(critique=_critique_with([_CONCERN_BLOCKING]),
+                                         synth_audit=audit_response,
+                                         synth_revisions=revisions_response))
+    # Reconciliation catches it: rm says MAJOR, md says MINOR -> failed.
+    assert rm["assessment_status"] == "failed"
+    assert rm["failure_mode"] == "verdict_inconsistent"
+    assert "verdict mismatch" in rm["notes"]
+    assert "MAJOR REVISION" in rm["notes"]
+    assert "MINOR REVISION" in rm["notes"]
+
+
+def test_reconciliation_drops_orphan_addresses_end_to_end(tmp_path):
+    """A required_changes entry citing a non-existent issue ID is cleaned."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    # rm core fixture with C1 in issues but R1 addressing BOTH C1 and a phantom BLOCKER-0.
+    core_with_orphan = json.dumps({
+        "verdict": "MINOR REVISION", "risk_score": 30, "risk_level": "MEDIUM",
+        "issues": {
+            "critical": [{"id": "C1", "description": "x", "evidence": "y"}],
+            "major": [], "minor": [], "suggestions": [],
+        },
+        "required_changes": [
+            {"id": "R1", "description": "z", "addresses": ["C1", "BLOCKER-0"]},
+        ],
+    })
+    rm = run_review("p", root=tmp_path, complete_fn=_backend(core=core_with_orphan))
+    # Reconciliation drops BLOCKER-0; C1 stays.
+    assert rm["required_changes"][0]["addresses"] == ["C1"]
+    assert "dropped 1 orphan" in rm.get("notes", "")
