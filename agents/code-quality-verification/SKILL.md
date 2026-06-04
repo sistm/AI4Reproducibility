@@ -207,7 +207,7 @@ When `status != "success"`, `cqv_output.json` MUST conform to this shape:
       "id": "BLOCKER-0",
       "severity": "CRITICAL",
       "description": "No code supplement available to verify.",
-      "evidence": "ai4r/<review_title>/logs/workflow.log"
+      "evidence": [{"file": "ai4r/<review_title>/logs/workflow.log", "line": 0}]
     }
   ],
   "partial_data": null,

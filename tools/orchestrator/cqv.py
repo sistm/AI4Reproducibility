@@ -26,6 +26,7 @@ CQV-specific output assembly lives here.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -90,12 +91,73 @@ def _user_prompt(assets_dir: Path, review_title: str) -> str:
     )
 
 
+# Evidence-shape uniformity (patch 0054) -------------------------------------
+#
+# Every ``reproducibility_blockers[*].evidence`` entry must be a list of
+# ``{file, line, snippet?}`` objects — not a string, never a mix. Before
+# 0054, two emitters (``_stat_blocker`` and ``_default_blocker``) produced
+# string-shaped evidence while the model-emitted ``BLOCKER-*`` entries used
+# the object-list shape. The drift caused Critic false positives in the
+# bimj_202400278 smoke run (K1: the Critic flagged the STAT entry's
+# string-form cite as a generic ``evidence_gap``, missing that the same
+# range was structurally cited under ``statistical_validity[*].evidence_refs``
+# anyway). Patch 0054 makes every evidence field uniform: emit objects from
+# both helpers, and defensively coerce any string-shaped entry the model
+# emits directly during ``_normalise``.
+
+_EVIDENCE_REF_PATTERN = re.compile(r"^(\S+?):(\d+)(?:-\d+)?\s*$")
+
+
+def _parse_evidence_ref(ref: str) -> dict[str, Any]:
+    """Parse a string evidence ref into the canonical ``{file, line}`` shape.
+
+    Examples:
+        ``"code/main.R:46"``          -> ``{"file": "code/main.R", "line": 46}``
+        ``"DoFiguresTables.R:43-49"`` -> ``{"file": "DoFiguresTables.R", "line": 43}``
+        ``"code/main.R"``             -> ``{"file": "code/main.R", "line": 0}``
+        ``"verification failed; ..."`` -> ``{"file": "verification failed; ...", "line": 0}``
+
+    Conservative: always returns a dict (never None) so the caller doesn't
+    need to handle parse failures. When the ``file:line`` pattern doesn't
+    match, the raw string lands in the ``file`` field with ``line: 0`` —
+    readers can spot these by ``line == 0`` and treat them as unstructured.
+    """
+    m = _EVIDENCE_REF_PATTERN.match(ref)
+    if m:
+        return {"file": m.group(1), "line": int(m.group(2))}
+    return {"file": ref, "line": 0}
+
+
+def _coerce_evidence(ev: Any) -> Any:
+    """Normalise an evidence field to a list of ``{file, line[, snippet]}`` objects.
+
+    Accepts: bare string (legacy shape), list of strings, list of objects,
+    or mixed list. Returns a list of objects, with raw strings parsed via
+    ``_parse_evidence_ref``. Non-string, non-dict items are dropped. Other
+    shapes pass through unchanged — preserves the model's raw output rather
+    than fabricating structure we cannot verify.
+    """
+    if isinstance(ev, str):
+        return [_parse_evidence_ref(ev)]
+    if isinstance(ev, list):
+        out = []
+        for item in ev:
+            if isinstance(item, str):
+                out.append(_parse_evidence_ref(item))
+            elif isinstance(item, dict):
+                out.append(item)
+            # silently skip other types — we don't fabricate structure
+        return out
+    return ev
+
+
 def _default_blocker(reason: str | None) -> dict[str, Any]:
+    text = reason or "ai4r/<review_title>/logs/workflow.log"
     return {
         "id": "BLOCKER-0",
         "severity": "CRITICAL",
         "description": "Verification incomplete; see repo_analysis.md.",
-        "evidence": reason or "ai4r/<review_title>/logs/workflow.log",
+        "evidence": [_parse_evidence_ref(text)],
     }
 
 
@@ -183,6 +245,13 @@ def _normalise(obj: dict[str, Any], review_title: str) -> dict[str, Any]:
 
     blockers = obj.get("reproducibility_blockers")
     blockers = blockers if isinstance(blockers, list) else []
+    # Patch 0054: defensively coerce any string-shaped evidence to the
+    # canonical object-list shape. Catches model-emitted blockers that use
+    # the legacy string form even though both internal emitters
+    # (_stat_blocker, _default_blocker) now produce object-lists.
+    for blocker in blockers:
+        if isinstance(blocker, dict) and "evidence" in blocker:
+            blocker["evidence"] = _coerce_evidence(blocker["evidence"])
     # Collapse duplicated blockers (the model tends to restate the same id both
     # nested in repository_audit and at the top level): keep first per id.
     seen: set[str] = set()
@@ -256,12 +325,24 @@ def _kbe_context(review_dir: Path) -> str:
 
 
 def _stat_blocker(verdict: dict[str, Any]) -> dict[str, Any]:
+    """Promote a failing statistical_validity verdict to a reproducibility_blocker.
+
+    Patch 0054: evidence is now a list of ``{file, line}`` objects, parsed
+    from ``evidence_refs`` strings. When the verdict has no refs at all,
+    synthesise a single unstructured entry from the rationale so the
+    blocker still meets the "every blocker has an evidence list" contract
+    — readers can detect synthetic entries by ``line == 0``.
+    """
     refs = verdict.get("evidence_refs") or []
+    if refs:
+        evidence = [_parse_evidence_ref(str(r)) for r in refs]
+    else:
+        evidence = [{"file": str(verdict.get("rationale", "")), "line": 0}]
     return {
         "id": f"STAT-{verdict['item_id']}",
         "severity": str(verdict["severity"]).upper(),
         "description": f"Statistical validity ({verdict['item_id']}): {verdict['rationale']}",
-        "evidence": "; ".join(str(r) for r in refs) or verdict["rationale"],
+        "evidence": evidence,
     }
 
 

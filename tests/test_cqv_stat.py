@@ -295,3 +295,176 @@ def test_prompt_states_evidence_array_and_no_duplication():
     prompt = _user_prompt(Path("/tmp/assets"), "x")
     assert "must be a JSON array" in prompt.replace("MUST", "must")
     assert "exactly ONCE" in prompt or "exactly once" in prompt.lower()
+
+
+# --- Evidence-schema uniformity (patch 0054) ---------------------------------
+
+
+@pytest.mark.parametrize("ref,expected", [
+    ("code/main.R:46", {"file": "code/main.R", "line": 46}),
+    ("DoFiguresTables.R:43-49", {"file": "DoFiguresTables.R", "line": 43}),
+    ("code/sub/p-valuesCompute.R:165", {"file": "code/sub/p-valuesCompute.R", "line": 165}),
+    # No line number: file in file field, line 0.
+    ("code/main.R", {"file": "code/main.R", "line": 0}),
+    # Unparseable: raw text in file field, line 0.
+    ("repository root", {"file": "repository root", "line": 0}),
+    ("Preflight extracted 0 files.", {"file": "Preflight extracted 0 files.", "line": 0}),
+    # Trailing whitespace tolerated.
+    ("file.R:42   ", {"file": "file.R", "line": 42}),
+])
+def test_parse_evidence_ref(ref, expected):
+    from tools.orchestrator.cqv import _parse_evidence_ref
+    assert _parse_evidence_ref(ref) == expected
+
+
+def test_coerce_evidence_string_to_object_list():
+    from tools.orchestrator.cqv import _coerce_evidence
+    assert _coerce_evidence("file.R:12") == [{"file": "file.R", "line": 12}]
+
+
+def test_coerce_evidence_list_of_strings():
+    from tools.orchestrator.cqv import _coerce_evidence
+    out = _coerce_evidence(["a.R:5", "b.R:10-20", "c.R"])
+    assert out == [
+        {"file": "a.R", "line": 5},
+        {"file": "b.R", "line": 10},
+        {"file": "c.R", "line": 0},
+    ]
+
+
+def test_coerce_evidence_list_of_objects_unchanged():
+    from tools.orchestrator.cqv import _coerce_evidence
+    given = [{"file": "x.R", "line": 1, "snippet": "..."}]
+    assert _coerce_evidence(given) == given
+
+
+def test_coerce_evidence_mixed_list():
+    """Mixed string + object list: strings coerced, objects pass through."""
+    from tools.orchestrator.cqv import _coerce_evidence
+    given = [{"file": "a.R", "line": 5}, "b.R:42", 12345]  # int silently dropped
+    assert _coerce_evidence(given) == [
+        {"file": "a.R", "line": 5},
+        {"file": "b.R", "line": 42},
+    ]
+
+
+def test_stat_blocker_emits_object_list_with_refs():
+    """patch 0054: STAT blocker evidence is now a list of {file, line} objects."""
+    from tools.orchestrator.cqv import _stat_blocker
+    verdict = {
+        "item_id": "cqv-stat-multiple-testing",
+        "tool_id": "judge_multiple_testing_correction",
+        "severity": "major",
+        "verdict": "fail",
+        "rationale": "Does not apply corrections.",
+        "evidence_refs": ["DoFiguresTables.R:43-49", "DoFiguresTables.R:154-164"],
+    }
+    blocker = _stat_blocker(verdict)
+    assert blocker["id"] == "STAT-cqv-stat-multiple-testing"
+    assert blocker["evidence"] == [
+        {"file": "DoFiguresTables.R", "line": 43},
+        {"file": "DoFiguresTables.R", "line": 154},
+    ]
+
+
+def test_stat_blocker_emits_synthetic_entry_when_no_refs():
+    """No evidence_refs: synthesise a single line-0 entry from the rationale."""
+    from tools.orchestrator.cqv import _stat_blocker
+    verdict = {
+        "item_id": "x", "severity": "major", "verdict": "fail",
+        "rationale": "Reason text here.", "evidence_refs": [],
+    }
+    blocker = _stat_blocker(verdict)
+    assert blocker["evidence"] == [{"file": "Reason text here.", "line": 0}]
+
+
+def test_default_blocker_emits_object_list_with_reason():
+    from tools.orchestrator.cqv import _default_blocker
+    out = _default_blocker("Preflight extracted 0 files.")
+    assert out["evidence"] == [{"file": "Preflight extracted 0 files.", "line": 0}]
+
+
+def test_default_blocker_emits_object_list_without_reason():
+    from tools.orchestrator.cqv import _default_blocker
+    out = _default_blocker(None)
+    assert out["evidence"] == [
+        {"file": "ai4r/<review_title>/logs/workflow.log", "line": 0},
+    ]
+
+
+def test_normalise_coerces_model_emitted_string_evidence(tmp_path):
+    """A model that emits string-shaped evidence directly is coerced during _normalise."""
+    from tools.orchestrator.cqv import _normalise
+    obj = {
+        "status": "partial",
+        "reproducibility_blockers": [
+            {
+                "id": "BLOCKER-X",
+                "severity": "HIGH",
+                "description": "model-emitted with legacy string evidence",
+                "evidence": "code/main.R:42",
+            },
+        ],
+    }
+    out = _normalise(obj, "test")
+    assert out["reproducibility_blockers"][0]["evidence"] == [
+        {"file": "code/main.R", "line": 42},
+    ]
+
+
+def test_normalise_coerces_list_with_mixed_string_objects():
+    """A model that emits a list of {file:line} strings is coerced."""
+    from tools.orchestrator.cqv import _normalise
+    obj = {
+        "status": "partial",
+        "reproducibility_blockers": [
+            {
+                "id": "BLOCKER-Y",
+                "severity": "MEDIUM",
+                "description": "string refs in list",
+                "evidence": ["a.R:1", "b.R:2-5", {"file": "c.R", "line": 99}],
+            },
+        ],
+    }
+    out = _normalise(obj, "test")
+    assert out["reproducibility_blockers"][0]["evidence"] == [
+        {"file": "a.R", "line": 1},
+        {"file": "b.R", "line": 2},
+        {"file": "c.R", "line": 99},
+    ]
+
+
+def test_run_cqv_emits_uniform_evidence_schema_for_stat_blocker(tmp_path):
+    """End-to-end: a stat-judge failure produces a blocker with object-list evidence.
+
+    Smoke-replay of the bimj_202400278 schema-drift case. The pre-0054 code
+    emitted ``"evidence": "analysis.R:2; analysis.R:5"``. The post-0054 code
+    emits the canonical object-list shape so the Critic and downstream
+    consumers see one uniform schema.
+    """
+    _seed(tmp_path, "schema", "df <- read.csv('d.csv')\nt.test(df$a, df$b)\n")
+    fail = {
+        "verdict": "fail",
+        "confidence": "high",
+        "rationale": "t.test without assumption checks.",
+        "evidence_refs": ["analysis.R:2-5", "analysis.R:7"],
+    }
+    out = run_cqv(
+        "schema",
+        root=tmp_path,
+        complete_fn=_backend(audit={"notes": "ok"}, verdict=fail),
+    )
+    stat_blocker = next(
+        b for b in out["reproducibility_blockers"]
+        if b["id"] == "STAT-cqv-stat-test-assumptions"
+    )
+    # Patch 0054: object-list shape, not "; "-joined string.
+    assert stat_blocker["evidence"] == [
+        {"file": "analysis.R", "line": 2},
+        {"file": "analysis.R", "line": 7},
+    ]
+    # Defensive: no string-shaped evidence anywhere in blockers.
+    for b in out["reproducibility_blockers"]:
+        assert isinstance(b["evidence"], list), (
+            f"Blocker {b['id']} has non-list evidence: {b['evidence']!r}"
+        )

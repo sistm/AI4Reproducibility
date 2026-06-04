@@ -39,13 +39,13 @@
       "id": "BLOCKER-0",
       "severity": "CRITICAL",
       "description": "Absolute paths and setwd() calls reduce portability.",
-      "evidence": "code/main.R:10"
+      "evidence": [{"file": "code/main.R", "line": 10}]
     },
     {
       "id": "BLOCKER-1",
       "severity": "HIGH",
       "description": "No dependency manifest found.",
-      "evidence": "repository root"
+      "evidence": [{"file": "repository root", "line": 0}]
     }
   ],
   "statistical_validity": [
