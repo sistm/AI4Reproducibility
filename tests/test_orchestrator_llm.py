@@ -331,3 +331,171 @@ def test_litellm_backend_fails_fast_on_non_transient(monkeypatch):
         _litellm_complete("m", [{"role": "user", "content": "x"}], [])
     assert attempts["n"] == 1  # no retries on non-transient
     assert sleep_calls == []  # no backoff sleep
+
+
+# --- Per-key retry budget (config) ---------------------------------------------
+
+
+def test_num_retries_no_key_uses_global_default(monkeypatch):
+    """Without a key, num_retries() returns the global default."""
+    monkeypatch.delenv("AI4R_NUM_RETRIES", raising=False)
+    assert num_retries() == 2
+
+
+def test_num_retries_no_key_honours_global_env(monkeypatch):
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "7")
+    assert num_retries() == 7
+
+
+def test_num_retries_known_key_returns_stage_default(monkeypatch):
+    """A tagged call site gets its baked-in higher budget by default."""
+    monkeypatch.delenv("AI4R_NUM_RETRIES", raising=False)
+    monkeypatch.delenv("AI4R_NUM_RETRIES_SYNTHESIS_REVISIONS", raising=False)
+    assert num_retries("synthesis_revisions") == 5
+
+
+def test_num_retries_per_key_env_wins_over_stage_default(monkeypatch):
+    """Per-key env var overrides the baked-in stage default."""
+    monkeypatch.setenv("AI4R_NUM_RETRIES_SYNTHESIS_REVISIONS", "9")
+    assert num_retries("synthesis_revisions") == 9
+
+
+def test_num_retries_per_key_env_can_disable_stage_bump(monkeypatch):
+    """Setting per-key env to 0 explicitly disables the stage's higher budget."""
+    monkeypatch.setenv("AI4R_NUM_RETRIES_SYNTHESIS_REVISIONS", "0")
+    assert num_retries("synthesis_revisions") == 0
+
+
+def test_num_retries_unknown_key_falls_back_to_global(monkeypatch):
+    """Keys without a baked-in default behave like the no-key path."""
+    monkeypatch.delenv("AI4R_NUM_RETRIES", raising=False)
+    monkeypatch.delenv("AI4R_NUM_RETRIES_UNKNOWN_THING", raising=False)
+    assert num_retries("unknown_thing") == 2
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "4")
+    assert num_retries("unknown_thing") == 4
+
+
+def test_num_retries_stage_default_bypasses_global_env(monkeypatch):
+    """Global env override does NOT silently downgrade a tagged stage's budget.
+
+    Rationale: a routine `AI4R_NUM_RETRIES=2` shouldn't quietly weaken a stage
+    that was tagged as critical. To override the tagged stage, the operator
+    must do so explicitly via the per-key env var.
+    """
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "1")
+    monkeypatch.delenv("AI4R_NUM_RETRIES_SYNTHESIS_REVISIONS", raising=False)
+    assert num_retries("synthesis_revisions") == 5  # stage default, not 1
+
+
+def test_backoff_cap_defaults_and_per_key(monkeypatch):
+    from tools.orchestrator.config import backoff_cap
+
+    monkeypatch.delenv("AI4R_BACKOFF_CAP", raising=False)
+    monkeypatch.delenv("AI4R_BACKOFF_CAP_SYNTHESIS_REVISIONS", raising=False)
+    assert backoff_cap() == 8
+    assert backoff_cap("synthesis_revisions") == 30
+
+    monkeypatch.setenv("AI4R_BACKOFF_CAP_SYNTHESIS_REVISIONS", "12")
+    assert backoff_cap("synthesis_revisions") == 12
+
+    monkeypatch.setenv("AI4R_BACKOFF_CAP", "20")
+    monkeypatch.delenv("AI4R_BACKOFF_CAP_SYNTHESIS_REVISIONS", raising=False)
+    assert backoff_cap() == 20
+    assert backoff_cap("synthesis_revisions") == 30  # stage default bypasses global env
+
+
+def test_backoff_cap_bad_env_falls_back(monkeypatch):
+    from tools.orchestrator.config import backoff_cap
+
+    monkeypatch.setenv("AI4R_BACKOFF_CAP", "not-an-int")
+    assert backoff_cap() == 8
+
+
+# --- with_retry_policy factory --------------------------------------------------
+
+
+def test_with_retry_policy_overrides_global_retries(monkeypatch):
+    """A CompleteFn built with with_retry_policy uses its own retry budget
+    even when the global env says otherwise — proves the override takes effect.
+    """
+    import sys
+    import time as _time
+    import types
+
+    calls = {"n": 0}
+    msg = types.SimpleNamespace(content="ok", tool_calls=None)
+    resp = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=msg, finish_reason="stop")]
+    )
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] < 4:  # fails 3 times then succeeds
+            raise RuntimeError("transient blip")
+        return resp
+
+    fake = types.ModuleType("litellm")
+    fake.completion = flaky
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    # Global says 1 retry (2 attempts) — would fail. Policy says 4 retries
+    # (5 attempts) — succeeds on attempt 4.
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "1")
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+
+    from tools.orchestrator.llm import with_retry_policy
+
+    policy_fn = with_retry_policy(retries=4, backoff_cap=1)
+    out = policy_fn("m", [{"role": "user", "content": "x"}], [])
+    assert out.text == "ok"
+    assert calls["n"] == 4
+
+
+def test_with_retry_policy_caps_backoff(monkeypatch):
+    """The factory's backoff_cap caps the exponential sleep schedule."""
+    import sys
+    import time as _time
+    import types
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+
+    def always_fail(**kw):
+        raise RuntimeError("blip")
+
+    fake = types.ModuleType("litellm")
+    fake.completion = always_fail
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+
+    from tools.orchestrator.llm import with_retry_policy
+
+    policy_fn = with_retry_policy(retries=4, backoff_cap=3)
+    with pytest.raises(RuntimeError):
+        policy_fn("m", [{"role": "user", "content": "x"}], [])
+    # 4 retries -> 4 sleeps. Schedule is min(2**attempt, 3): 1, 2, 3, 3.
+    assert sleeps == [1, 2, 3, 3]
+
+
+def test_with_retry_policy_backoff_cap_none_falls_back_to_config(monkeypatch):
+    """backoff_cap=None on the factory consults config — preserves the seam."""
+    import sys
+    import time as _time
+    import types
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+
+    def always_fail(**kw):
+        raise RuntimeError("blip")
+
+    fake = types.ModuleType("litellm")
+    fake.completion = always_fail
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.setenv("AI4R_BACKOFF_CAP", "2")
+
+    from tools.orchestrator.llm import with_retry_policy
+
+    policy_fn = with_retry_policy(retries=3)  # backoff_cap=None -> config (2)
+    with pytest.raises(RuntimeError):
+        policy_fn("m", [{"role": "user", "content": "x"}], [])
+    # 3 retries -> 3 sleeps, capped at 2: 1, 2, 2.
+    assert sleeps == [1, 2, 2]

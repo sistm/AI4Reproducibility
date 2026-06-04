@@ -43,9 +43,9 @@ from tools.orchestrator._stage import (
     now_iso,
     parse_json_object,
 )
-from tools.orchestrator.config import model_for
+from tools.orchestrator.config import backoff_cap, model_for, num_retries
 from tools.orchestrator.critique import run_critique
-from tools.orchestrator.llm import CompleteFn, run_agent
+from tools.orchestrator.llm import CompleteFn, run_agent, with_retry_policy
 from tools.orchestrator.reconcile import reconcile_review, snapshot_draft
 
 _VERDICTS = {"ACCEPT", "MINOR REVISION", "MAJOR REVISION", "REJECT"}
@@ -662,6 +662,24 @@ def _apply_revised_md(
     return out, revised_names
 
 
+def _revisions_complete_fn(injected: CompleteFn | None) -> CompleteFn:
+    """Pick the complete_fn for the Synthesiser revisions call (patch 0060).
+
+    When ``injected`` is provided (tests, or callers with their own retry
+    semantics), pass it through unchanged — the caller owns the policy. When
+    ``None``, wrap the default backend with the ``synthesis_revisions`` retry
+    policy: a fatter budget and longer backoff cap so a routine ILaaS
+    connection blip doesn't poison the critical write-path call (whose failure
+    forces reconciliation to degrade the whole Review).
+    """
+    if injected is not None:
+        return injected
+    return with_retry_policy(
+        retries=num_retries("synthesis_revisions"),
+        backoff_cap=backoff_cap("synthesis_revisions"),
+    )
+
+
 def _run_synthesis_final(
     rm: dict[str, Any],
     md_files: dict[str, str],
@@ -732,10 +750,15 @@ def _run_synthesis_final(
         return out_rm, final_md
 
     # ---- Call 2: revisions ----
+    # Synthesiser Call 2 is the critical write-path call: when it fails,
+    # reconciliation has to degrade the whole Review. The helper wraps the
+    # default backend with a higher retry budget for this call only (patch
+    # 0060); an injected complete_fn passes through unchanged.
+    revisions_complete_fn = _revisions_complete_fn(complete_fn)
     try:
         raw2 = _run_call(
             _synthesis_revisions_prompt(rm, md_files, critique, incorporated),
-            model_name, complete_fn,
+            model_name, revisions_complete_fn,
         )
     except Exception as exc:
         # Audit trail SURVIVES — only the revisions are lost. This is the key
@@ -750,7 +773,9 @@ def _run_synthesis_final(
         out_rm["notes"] = f"{existing}\n{joined}".strip() if existing else joined
         return out_rm, final_md
 
-    parsed2, repaired_via2, parse_err2 = _parse_with_salvage(raw2, model_name, complete_fn)
+    parsed2, repaired_via2, parse_err2 = _parse_with_salvage(
+        raw2, model_name, revisions_complete_fn
+    )
     if parsed2 is None:
         notes_to_add.append(
             f"[synthesis revisions pass failed: output_parse_failed ({parse_err2}); "

@@ -106,12 +106,22 @@ class OutputTruncated(RuntimeError):
 
 
 def _litellm_complete(
-    model: str, messages: list[dict[str, Any]], tools: Sequence[ToolSpec]
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: Sequence[ToolSpec],
+    *,
+    retries: int | None = None,
+    backoff_cap: int | None = None,
 ) -> LLMResponse:
     """Default backend: call LiteLLM once and normalise the response.
 
     LiteLLM is imported here, not at module top, so importing this module — and
     unit-testing the loop with a fake backend — never requires LiteLLM.
+
+    ``retries`` and ``backoff_cap`` override the values from :mod:`config`. Pass
+    ``None`` (the default) to consult the global config — keeping the call-as-
+    ``CompleteFn`` signature unchanged. Use :func:`with_retry_policy` to bind
+    overrides for a specific call site without changing the ``CompleteFn`` type.
     """
     import litellm  # lazy: only needed for real calls
 
@@ -126,21 +136,23 @@ def _litellm_complete(
     if tools:
         kwargs["tools"] = list(tools)
 
+    eff_retries = retries if retries is not None else config.num_retries()
+    eff_cap = backoff_cap if backoff_cap is not None else config.backoff_cap()
+
     # Retry in-process rather than delegating to LiteLLM's ``num_retries``: that
     # path imports ``tenacity``, a transitive dependency that — when absent —
     # crashes the call outright ("No module named 'tenacity'"), silently killing
     # a section. A small self-contained loop keeps retries working with no extra
     # dependency. Only transient errors are retried (rate-limit/timeout/5xx);
     # 4xx classes like auth or bad-request fail-fast — see _is_transient.
-    retries = config.num_retries()
-    for attempt in range(retries + 1):
+    for attempt in range(eff_retries + 1):
         try:
             response = litellm.completion(**kwargs)
             break
         except Exception as exc:
-            if attempt >= retries or not _is_transient(exc):
+            if attempt >= eff_retries or not _is_transient(exc):
                 raise
-            time.sleep(min(2 ** attempt, 8))
+            time.sleep(min(2 ** attempt, eff_cap))
     message = response.choices[0].message
 
     calls: list[ToolCall] = []
@@ -151,6 +163,32 @@ def _litellm_complete(
 
     finish_reason = getattr(response.choices[0], "finish_reason", None)
     return LLMResponse(text=message.content, tool_calls=calls, finish_reason=finish_reason)
+
+
+def with_retry_policy(
+    *, retries: int, backoff_cap: int | None = None
+) -> CompleteFn:
+    """Return a :data:`CompleteFn` wrapping the default backend with a fixed
+    retry policy.
+
+    Use at call sites whose retry budget should differ from the global default
+    (e.g. critical write-path calls that should ride out longer gateway blips).
+    The returned function has the standard ``CompleteFn`` signature, so it
+    drops into any place a ``complete_fn`` is expected without touching the
+    type alias or breaking injected test fakes.
+
+    ``backoff_cap=None`` falls back to the global config cap.
+    """
+    def _wrapped(
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: Sequence[ToolSpec],
+    ) -> LLMResponse:
+        return _litellm_complete(
+            model, messages, tools,
+            retries=retries, backoff_cap=backoff_cap,
+        )
+    return _wrapped
 
 
 def _assistant_message(resp: LLMResponse) -> dict[str, Any]:

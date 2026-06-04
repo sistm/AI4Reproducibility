@@ -1262,3 +1262,62 @@ def test_reconciliation_drops_orphan_addresses_end_to_end(tmp_path):
     # Reconciliation drops BLOCKER-0; C1 stays.
     assert rm["required_changes"][0]["addresses"] == ["C1"]
     assert "dropped 1 orphan" in rm.get("notes", "")
+
+
+# --- patch 0060: per-call retry budget at the Synthesiser revisions site ---
+
+
+def test_revisions_complete_fn_passes_injected_through():
+    """When the caller injects a complete_fn (tests, or any caller with their
+    own retry semantics), it must be returned unchanged — caller owns policy."""
+    from tools.orchestrator.review import _revisions_complete_fn
+
+    def injected(model, messages, tools):  # pragma: no cover - identity check
+        return LLMResponse(text="x")
+
+    assert _revisions_complete_fn(injected) is injected
+
+
+def test_revisions_complete_fn_wraps_with_synthesis_revisions_policy(monkeypatch):
+    """When complete_fn is None (real pipeline run), the helper must wrap the
+    default backend with the synthesis_revisions retry policy. This is the
+    behaviour change patch 0060 introduces: Call 2 rides out gateway blips
+    that would otherwise force reconciliation to degrade the whole Review.
+    """
+    from tools.orchestrator import review
+
+    captured: dict = {}
+
+    def spy(*, retries, backoff_cap=None):
+        captured["retries"] = retries
+        captured["backoff_cap"] = backoff_cap
+        return lambda m, ms, ts: LLMResponse(text="ok")
+
+    monkeypatch.setattr(review, "with_retry_policy", spy)
+    monkeypatch.delenv("AI4R_NUM_RETRIES_SYNTHESIS_REVISIONS", raising=False)
+    monkeypatch.delenv("AI4R_BACKOFF_CAP_SYNTHESIS_REVISIONS", raising=False)
+
+    review._revisions_complete_fn(None)
+    # The stage-default values from config.py:
+    assert captured["retries"] == 5
+    assert captured["backoff_cap"] == 30
+
+
+def test_revisions_complete_fn_honours_env_overrides(monkeypatch):
+    """Operator can tune the policy without code changes via env vars."""
+    from tools.orchestrator import review
+
+    captured: dict = {}
+
+    def spy(*, retries, backoff_cap=None):
+        captured["retries"] = retries
+        captured["backoff_cap"] = backoff_cap
+        return lambda m, ms, ts: LLMResponse(text="ok")
+
+    monkeypatch.setattr(review, "with_retry_policy", spy)
+    monkeypatch.setenv("AI4R_NUM_RETRIES_SYNTHESIS_REVISIONS", "8")
+    monkeypatch.setenv("AI4R_BACKOFF_CAP_SYNTHESIS_REVISIONS", "45")
+
+    review._revisions_complete_fn(None)
+    assert captured["retries"] == 8
+    assert captured["backoff_cap"] == 45
