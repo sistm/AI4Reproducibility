@@ -340,20 +340,32 @@ def _load_checklist_rubric() -> str:
     return "\n".join(lines)
 
 
-def _checklist_prompt(context: str, assessment_status: str) -> str:
+def _checklist_prompt(
+    context: str, assessment_status: str, *, evidence_files: str = "",
+) -> str:
     """Build the checklist.md prompt with rubric and template injected verbatim.
 
     The model receives the 24 item IDs/descriptions from checklist.yaml and the
     filled-template skeleton from review-template.md so it anchors to the exact
     rubric rather than free-generating items.
+
+    Patch 0062: checklist [AUDIT NOTE] tokens are cited evidence too — same
+    fabrication risk as the risk-matrix and final-review prompts. Inject the
+    available-files block and cite-format rules so the model is held to the
+    same standard.
     """
     rubric = _load_checklist_rubric()
     template = load_skill("review/assets/review-template.md")
+    files_listing = evidence_files or "  (no evidence files listed)"
+    files_block = (
+        f"<available_evidence_files>\n{files_listing}\n</available_evidence_files>\n\n"
+    )
     return (
         f"{_UPSTREAM_SECURITY_NOTICE}\n\n"
         f"<upstream_outputs assessment_status={assessment_status}>\n"
         f"{context}\n"
         "</upstream_outputs>\n\n"
+        f"{files_block}"
         "---\n\n"
         "## Checklist rubric — use these 24 item IDs and descriptions verbatim\n\n"
         f"{rubric}\n\n"
@@ -363,6 +375,7 @@ def _checklist_prompt(context: str, assessment_status: str) -> str:
         "---\n\n"
         "Fill every [VERDICT] token with exactly one of: PASS, FAIL, UNVERIFIED.\n"
         "Fill every [AUDIT NOTE] with one sentence citing file:line from the upstream outputs.\n"
+        f"{_CITE_FORMAT_RULES}\n\n"
         "Use [x] for PASS, [ ] for FAIL and UNVERIFIED.\n"
         "Append **Required action:** sub-bullet ONLY on FAIL items. Each "
         "Required action MUST name a concrete change (action verb + file or "
@@ -1004,7 +1017,9 @@ def run_review(
     for filename, guidance in _MD_OUTPUTS.items():
         try:
             prompt = (
-                _checklist_prompt(context, assessment_status)
+                _checklist_prompt(
+                    context, assessment_status, evidence_files=evidence_files,
+                )
                 if filename == "checklist.md"
                 else _md_prompt(
                     guidance, context, assessment_status,

@@ -1481,3 +1481,64 @@ def test_run_review_handles_unreadable_markdown_in_evidence_enumeration(tmp_path
     rm = run_review("p", root=tmp_path, complete_fn=be)
     # No crash, pipeline completed.
     assert rm["paper_id"] == "p"
+
+
+# --- patch 0062: checklist cite discipline ------------------------------------
+
+
+def test_checklist_prompt_with_evidence_files_carries_cite_discipline():
+    """The checklist prompt requires '[AUDIT NOTE] citing file:line' so it
+    also produces cite-bearing output. Same fabrication risk as the
+    risk_matrix and final_review prompts — propagate the same discipline."""
+    from tools.orchestrator.review import _checklist_prompt
+
+    p = _checklist_prompt(
+        "ctx", "complete",
+        evidence_files="  - ai4r/p/cqv/cqv_output.json  [JSON — cite as PATH#KEY_PATH; NEVER use #L<n>]",
+    )
+    assert "<available_evidence_files>" in p
+    assert "ai4r/p/cqv/cqv_output.json" in p
+    assert "Cite-format discipline" in p
+    # Same forbidden-form rules surfaced as in risk/md prompts.
+    assert "do NOT invent file names" in p
+    assert "NEVER use #L<n>" in p
+    assert "OMIT the claim" in p
+
+
+def test_checklist_prompt_without_evidence_files_uses_placeholder():
+    """Bare-call backward-compat: block + rules always present, list is a placeholder."""
+    from tools.orchestrator.review import _checklist_prompt
+
+    p = _checklist_prompt("ctx", "complete")
+    assert "<available_evidence_files>" in p
+    assert "no evidence files listed" in p
+    assert "Cite-format discipline" in p
+    # Pre-existing structural expectations preserved.
+    assert "Required action" in p
+    assert "[VERDICT]" in p
+
+
+def test_run_review_wires_evidence_files_into_checklist_prompt(tmp_path):
+    """End-to-end: run_review threads the on-disk file list into the checklist
+    prompt (not just risk_matrix and md_prompt)."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+
+    captured: list[str] = []
+
+    def capturing_backend(model, messages, tools):
+        u = messages[-1]["content"]
+        captured.append(u)
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        return LLMResponse(text=_GOOD_MD)
+
+    run_review("p", root=tmp_path, complete_fn=capturing_backend)
+
+    # Identify the checklist prompt by its rubric tokens.
+    checklist_prompts = [p for p in captured if "bj-01-readme" in p]
+    assert checklist_prompts, "no checklist prompt captured"
+    cl = checklist_prompts[0]
+    assert "<available_evidence_files>" in cl
+    assert "ai4r/p/kbe/kbe_output.json" in cl
+    assert "ai4r/p/cqv/cqv_output.json" in cl
+    assert "Cite-format discipline" in cl
