@@ -222,12 +222,88 @@ _UPSTREAM_SECURITY_NOTICE = (
 )
 
 
-def _risk_prompt(context: str, assessment_status: str) -> str:
+# Subdirectories under ai4r/<title>/ that may contain citable evidence at draft
+# time. ``review/`` is excluded (it's Review's own output dir, written AFTER the
+# draft prompt fires); ``logs/`` is excluded (operational, not evidence).
+_EVIDENCE_SUBDIRS = ("kbe", "cqv", "er", "input")
+
+
+def _available_evidence_files(review_dir: Path, review_title: str) -> str:
+    """Enumerate citable evidence files for prompt injection (patch 0055).
+
+    The draft model otherwise invents file names and slaps ``#L1`` onto JSON
+    files because the prompt never tells it which files exist or what cite
+    anchor format applies to each. Listing them — with the valid anchor form
+    per file type — kills the dominant source of Critic ``evidence_gap``
+    concerns.
+
+    Returns a formatted multi-line block ending in a newline, or a single
+    placeholder line if no evidence files are present (early-pipeline call,
+    test stubs with no workspace).
+    """
+    prefix = f"ai4r/{review_title}/"
+    lines: list[str] = []
+    for sub in _EVIDENCE_SUBDIRS:
+        sub_dir = review_dir / sub
+        if not sub_dir.is_dir():
+            continue
+        for p in sorted(sub_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = prefix + str(p.relative_to(review_dir))
+            if p.suffix == ".json":
+                guide = "JSON — cite as PATH#KEY_PATH; NEVER use #L<n>"
+            elif p.suffix in {".md", ".txt"}:
+                try:
+                    n_lines = p.read_text(encoding="utf-8").count("\n") + 1
+                    guide = f"markdown — cite as PATH#L<n>, 1 <= n <= {n_lines}"
+                except (OSError, UnicodeDecodeError):
+                    guide = "markdown — cite as PATH#L<n>"
+            else:
+                guide = "binary/other — cite as PATH (no anchor)"
+            lines.append(f"  - {rel}  [{guide}]")
+    if not lines:
+        return "  (no evidence files on disk yet)"
+    return "\n".join(lines)
+
+
+# Strict cite-format rules. Injected into prompts that produce cite-bearing
+# output (risk_matrix issues, markdown reports). Pairs with the file
+# enumeration above: the model is told both WHICH files exist and HOW to
+# anchor into each.
+_CITE_FORMAT_RULES = (
+    "Cite-format discipline (STRICT — invalid cites are the dominant Critic "
+    "failure mode). Each `evidence` value MUST be a cite of the form:\n"
+    "  - JSON files: `PATH#<key_path>` where <key_path> is a dotted-bracketed "
+    "key path into existing keys, e.g. `ai4r/<title>/kbe/kbe_output.json"
+    "#reproducibility_gaps[2]`, `ai4r/<title>/cqv/cqv_output.json"
+    "#statistical_validity[].item_id:cqv-stat-multiple-testing`, "
+    "`ai4r/<title>/cqv/cqv_output.json#static_check_violations"
+    ".check_absolute_paths.evidence`.\n"
+    "  - Markdown/text files: `PATH#L<n>` only if the file appears in "
+    "<available_evidence_files> AND <n> is within its stated line extent.\n"
+    "Forbidden cite forms: (a) any file path not listed in "
+    "<available_evidence_files> — do NOT invent file names; (b) `#L<n>` "
+    "against a `.json` file (JSON has no semantic lines); (c) string-as-"
+    'line-number forms like `#L"some-id"` or `#L<word>`. If a claim has no '
+    "anchorable evidence in any listed file, OMIT the claim rather than "
+    "fabricate a cite."
+)
+
+
+def _risk_prompt(
+    context: str, assessment_status: str, *, evidence_files: str = "",
+) -> str:
+    files_listing = evidence_files or "  (no evidence files listed)"
+    files_block = (
+        f"<available_evidence_files>\n{files_listing}\n</available_evidence_files>\n\n"
+    )
     return (
         f"{_UPSTREAM_SECURITY_NOTICE}\n\n"
         f"<upstream_outputs assessment_status={assessment_status}>\n"
         f"{context}\n"
         "</upstream_outputs>\n\n"
+        f"{files_block}"
         "Synthesise the reproducibility risk-matrix core from the upstream outputs "
         "above. Cite evidence only from those outputs; for anything the upstream "
         "could not verify, leave it out of issues rather than inventing evidence.\n\n"
@@ -237,6 +313,7 @@ def _risk_prompt(context: str, assessment_status: str) -> str:
         '"major": [], "minor": [], "suggestions": []}, "required_changes": []} — no '
         "prose, no markdown fences. Each issue is an object with id, description and "
         "an evidence file path under ai4r/<review_title>/.\n\n"
+        f"{_CITE_FORMAT_RULES}\n\n"
         "Each required_changes entry MUST be concrete and actionable. A good entry "
         'names a specific action verb (replace, add, remove, rename, pin, document) '
         "and the file or identifier affected, e.g.: "
@@ -299,12 +376,23 @@ def _checklist_prompt(context: str, assessment_status: str) -> str:
     )
 
 
-def _md_prompt(guidance: str, context: str, assessment_status: str) -> str:
+def _md_prompt(
+    guidance: str,
+    context: str,
+    assessment_status: str,
+    *,
+    evidence_files: str = "",
+) -> str:
+    files_listing = evidence_files or "  (no evidence files listed)"
+    files_block = (
+        f"<available_evidence_files>\n{files_listing}\n</available_evidence_files>\n\n"
+    )
     return (
         f"{_UPSTREAM_SECURITY_NOTICE}\n\n"
         f"<upstream_outputs assessment_status={assessment_status}>\n"
         f"{context}\n"
         "</upstream_outputs>\n\n"
+        f"{files_block}"
         f"Write {guidance}.\n"
         "Return the document as GitHub-flavoured Markdown only. Cite evidence by "
         "file path under ai4r/<review_title>/, and never invent results the "
@@ -312,6 +400,7 @@ def _md_prompt(guidance: str, context: str, assessment_status: str) -> str:
         "```markdown ... ``` fence — the output IS the document, not a code "
         "block containing one. Inner ```r / ```python fences for code samples "
         "are fine.\n\n"
+        f"{_CITE_FORMAT_RULES}\n\n"
         "Style discipline:\n"
         "  - Write directly. Avoid hedging words (may, might, could, appears "
         "to, seems to, arguably) unless the evidence itself is genuinely "
@@ -857,10 +946,14 @@ def run_review(
         "complete" if kbe_status == "success" and cqv_status == "success" else "partial"
     )
     context = _context_blob(kbe, cqv, er)
+    evidence_files = _available_evidence_files(review_dir, review_title)
     model_name = model or model_for("review")
 
     try:
-        core_raw = _run_call(_risk_prompt(context, assessment_status), model_name, complete_fn)
+        core_raw = _run_call(
+            _risk_prompt(context, assessment_status, evidence_files=evidence_files),
+            model_name, complete_fn,
+        )
     except Exception as exc:  # LLM transport failure: no synthesis happened, write 4 files
         rm = _assemble(
             review_title, paper_title, "failed", upstream_status, None,
@@ -913,7 +1006,10 @@ def run_review(
             prompt = (
                 _checklist_prompt(context, assessment_status)
                 if filename == "checklist.md"
-                else _md_prompt(guidance, context, assessment_status)
+                else _md_prompt(
+                    guidance, context, assessment_status,
+                    evidence_files=evidence_files,
+                )
             )
             # Strip an outer ```markdown fence if the model wrapped the whole
             # document in one (observed failure mode — see _strip_outer_md_fence).

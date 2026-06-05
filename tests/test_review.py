@@ -1321,3 +1321,163 @@ def test_revisions_complete_fn_honours_env_overrides(monkeypatch):
     review._revisions_complete_fn(None)
     assert captured["retries"] == 8
     assert captured["backoff_cap"] == 45
+
+
+# --- patch 0055: draft cite-format discipline ---------------------------------
+
+
+def test_available_evidence_files_lists_existing_files_with_anchor_guidance(tmp_path):
+    """The enumerator walks kbe/cqv/er/input, labels each file by anchor form,
+    and counts lines for markdown so the model knows the valid extent."""
+    from tools.orchestrator.review import _available_evidence_files
+
+    base = tmp_path / "ai4r" / "p"
+    (base / "kbe").mkdir(parents=True)
+    (base / "kbe" / "kbe_output.json").write_text('{"k": 1}')
+    (base / "kbe" / "notes.md").write_text("line 1\nline 2\nline 3\n")
+    (base / "cqv").mkdir()
+    (base / "cqv" / "cqv_output.json").write_text('{"c": 2}')
+    (base / "cqv" / "repo_analysis.md").write_text("only one line\n")
+
+    out = _available_evidence_files(base, "p")
+
+    # JSON files get key-path guidance, NOT line guidance.
+    assert "ai4r/p/kbe/kbe_output.json" in out
+    assert "ai4r/p/cqv/cqv_output.json" in out
+    assert "JSON — cite as PATH#KEY_PATH" in out
+    assert "NEVER use #L<n>" in out
+    # Markdown files get line bounds.
+    assert "ai4r/p/kbe/notes.md" in out
+    assert "1 <= n <= 4" in out  # 3 newlines -> 4 line slots
+    assert "ai4r/p/cqv/repo_analysis.md" in out
+    assert "1 <= n <= 2" in out  # 1 newline -> 2 line slots
+
+
+def test_available_evidence_files_excludes_review_dir(tmp_path):
+    """The Review's own output directory is NOT citable (doesn't exist at
+    draft time anyway, but never list a file written by the prompt's own
+    output)."""
+    from tools.orchestrator.review import _available_evidence_files
+
+    base = tmp_path / "ai4r" / "p"
+    (base / "kbe").mkdir(parents=True)
+    (base / "kbe" / "kbe_output.json").write_text("{}")
+    (base / "review").mkdir()
+    (base / "review" / "should_not_appear.md").write_text("x\n")
+    (base / "logs").mkdir()
+    (base / "logs" / "workflow.log").write_text("x\n")
+
+    out = _available_evidence_files(base, "p")
+    assert "kbe_output.json" in out
+    assert "should_not_appear" not in out
+    assert "workflow.log" not in out
+
+
+def test_available_evidence_files_empty_workspace_returns_placeholder(tmp_path):
+    """Pre-seed call sites (early tests with no on-disk workspace) get a
+    placeholder line, not a crash."""
+    from tools.orchestrator.review import _available_evidence_files
+
+    out = _available_evidence_files(tmp_path / "ai4r" / "nonexistent", "nonexistent")
+    assert "no evidence files" in out
+
+
+def test_risk_prompt_with_evidence_files_carries_cite_discipline():
+    """The cite-format rules and the available-files block are present
+    universally; when ``evidence_files`` is supplied, the list appears
+    inside the block, otherwise a placeholder line is shown. The rules are
+    always there because they reference the block by name."""
+    from tools.orchestrator.review import _risk_prompt
+
+    # With evidence_files: the listing appears inside the block.
+    p = _risk_prompt(
+        "ctx", "complete",
+        evidence_files="  - ai4r/p/kbe/kbe_output.json  [JSON — cite as PATH#KEY_PATH; NEVER use #L<n>]",
+    )
+    assert "<available_evidence_files>" in p
+    assert "ai4r/p/kbe/kbe_output.json" in p
+    assert "Cite-format discipline" in p
+    # Forbidden forms named explicitly.
+    assert "NEVER use #L<n>" in p
+    assert "do NOT invent file names" in p
+    assert "OMIT the claim" in p
+    # Valid forms shown by example.
+    assert "key_path" in p.lower() or "KEY_PATH" in p
+
+    # Without evidence_files: placeholder appears, rules still present.
+    p_bare = _risk_prompt("ctx", "complete")
+    assert "<available_evidence_files>" in p_bare
+    assert "no evidence files listed" in p_bare
+    assert "Cite-format discipline" in p_bare
+
+
+def test_md_prompt_with_evidence_files_carries_cite_discipline():
+    """Same rules apply to the markdown-document prompts — the smoke run
+    showed final_review.md was the worst offender for fabricated cites."""
+    from tools.orchestrator.review import _md_prompt
+
+    p = _md_prompt(
+        "a final review", "ctx", "complete",
+        evidence_files="  - ai4r/p/cqv/cqv_output.json  [JSON — cite as PATH#KEY_PATH; NEVER use #L<n>]",
+    )
+    assert "<available_evidence_files>" in p
+    assert "ai4r/p/cqv/cqv_output.json" in p
+    assert "Cite-format discipline" in p
+    assert "do NOT invent file names" in p
+    # The string-as-line-anchor form is explicitly forbidden (the
+    # `#L"reproducibility_gaps"` form seen in the smoke run).
+    assert '#L"' in p  # the forbidden example is named
+
+
+def test_run_review_wires_evidence_files_into_draft_prompts(tmp_path):
+    """End-to-end: run_review threads the on-disk file list into both the
+    risk_matrix and markdown prompts. This is the wiring patch 0055 adds."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+
+    captured: list[str] = []
+
+    def capturing_backend(model, messages, tools):
+        u = messages[-1]["content"]
+        captured.append(u)
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        return LLMResponse(text=_GOOD_MD)
+
+    run_review("p", root=tmp_path, complete_fn=capturing_backend)
+
+    # The seed wrote kbe_output.json and cqv_output.json; the draft prompts
+    # should both list them under <available_evidence_files>.
+    risk_prompts = [p for p in captured if '"risk_score"' in p and "Return ONLY" in p]
+    assert risk_prompts, "no risk_matrix draft prompt captured"
+    rp = risk_prompts[0]
+    assert "<available_evidence_files>" in rp
+    assert "ai4r/p/kbe/kbe_output.json" in rp
+    assert "ai4r/p/cqv/cqv_output.json" in rp
+    assert "Cite-format discipline" in rp
+
+    # At least one markdown draft prompt also wired the file list.
+    md_prompts = [
+        p for p in captured
+        if '"risk_score"' not in p and "<available_evidence_files>" in p
+    ]
+    assert md_prompts, "no markdown draft prompt with evidence_files captured"
+    assert "ai4r/p/kbe/kbe_output.json" in md_prompts[0]
+
+
+def test_run_review_handles_unreadable_markdown_in_evidence_enumeration(tmp_path):
+    """If a markdown file is unreadable (encoding error), the enumerator
+    falls back to a bound-less guide instead of crashing. End-to-end the
+    pipeline must still run."""
+    _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    # Write a not-quite-utf8 byte sequence to the cqv markdown.
+    (tmp_path / "ai4r" / "p" / "cqv" / "repo_analysis.md").write_bytes(b"\xff\xfe broken bytes\n")
+
+    def be(model, messages, tools):
+        u = messages[-1]["content"]
+        if '"risk_score"' in u and "Return ONLY" in u:
+            return LLMResponse(text=GOOD_CORE)
+        return LLMResponse(text=_GOOD_MD)
+
+    rm = run_review("p", root=tmp_path, complete_fn=be)
+    # No crash, pipeline completed.
+    assert rm["paper_id"] == "p"
