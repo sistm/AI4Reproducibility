@@ -82,6 +82,56 @@ _SECURITY_NOTICE = (
 # markdown headings or JSON pointers semantically.
 
 
+# Subdirectories under ai4r/<title>/ that map a malformed "dotted key path"
+# ref (no ``#`` separator) back to a JSON key path into the stage's output
+# file. These are the stages whose primary artifact is a JSON file: an
+# evidence ref that looks like ``ai4r/<title>/<stage>/<rest>`` where ``<rest>``
+# doesn't exist as a file is almost certainly a key path the model wrote
+# without remembering the ``output.json#`` prefix — see patch 0061.
+_STAGE_OUTPUT_FILES: dict[str, str] = {
+    "kbe": "kbe_output.json",
+    "cqv": "cqv_output.json",
+    "er": "er_output.json",
+}
+
+
+def _salvage_keypath_ref(ref: str, root: Path) -> str | None:
+    """Best-effort "did you mean ...?" rewrite for malformed JSON key-path cites.
+
+    The smoke run (handoff §6) surfaced a pattern where the model writes a
+    JSON key path as if it were a file path — e.g.
+    ``ai4r/smoke-test/cqv/repository_audit.dependency_validation`` when it
+    meant ``ai4r/smoke-test/cqv/cqv_output.json#repository_audit.dependency_validation``.
+    Without salvage the resolver reports "file does not exist" and the ref
+    falls into ``dropped``, even though intent is recoverable.
+
+    Heuristic (deliberately conservative): the ref must be ``ai4r/<title>/<stage>/<rest>``
+    where ``<stage>`` is in :data:`_STAGE_OUTPUT_FILES`, the stage's
+    ``*_output.json`` exists on disk, ``<rest>`` doesn't have a directory
+    separator, and the original ref has no ``#`` (already-anchored refs are
+    left alone). Returns the rewritten ref or ``None``.
+
+    Patch 0055 reduces the population of refs this fires on by tightening the
+    draft prompt; 0061 is the defensive backstop for the cases that still slip
+    through.
+    """
+    if not isinstance(ref, str) or "#" in ref or not ref.startswith("ai4r/"):
+        return None
+    parts = ref.split("/", 3)
+    # ai4r / <title> / <stage> / <rest>
+    if len(parts) < 4:
+        return None
+    title, stage, rest = parts[1], parts[2], parts[3]
+    if "/" in rest or not rest:
+        return None
+    output_name = _STAGE_OUTPUT_FILES.get(stage)
+    if output_name is None:
+        return None
+    if not (root / "ai4r" / title / stage / output_name).is_file():
+        return None
+    return f"ai4r/{title}/{stage}/{output_name}#{rest}"
+
+
 def _resolve_evidence_ref(ref: str, root: Path) -> tuple[str, str | None]:
     """Resolve an evidence ref against the on-disk workspace.
 
@@ -176,6 +226,11 @@ def _filter_critic_refs(
     ``blocking`` concerns need at least one ref + an action — a blocking
     concern whose refs all got dropped downgrades to ``material`` so the
     audit trail records the issue while still meeting the rule.
+
+    Patch 0061: before declaring a ref broken, try :func:`_salvage_keypath_ref`
+    to rewrite malformed dotted-key-path refs into the proper ``output.json#key_path``
+    form. Salvaged refs are kept (in their rewritten form) and recorded under
+    ``ref_audit.salvaged`` for visibility.
     """
     out: list[dict[str, Any]] = []
     for c in concerns:
@@ -183,15 +238,31 @@ def _filter_critic_refs(
             continue
         kept: list[str] = []
         dropped: list[dict[str, str]] = []
+        salvaged: list[dict[str, str]] = []
         for ref in c.get("evidence_refs", []) or []:
             status, detail = _resolve_evidence_ref(ref, root)
             if status == "broken":
+                rewritten = _salvage_keypath_ref(ref, root)
+                if rewritten is not None:
+                    # Re-resolve the rewritten ref; only keep if it resolves
+                    # cleanly. This guards against salvage producing a ref
+                    # that still misses (e.g. wrong stage assumption).
+                    re_status, _ = _resolve_evidence_ref(rewritten, root)
+                    if re_status != "broken":
+                        kept.append(rewritten)
+                        salvaged.append({"original": ref, "rewritten": rewritten})
+                        continue
                 dropped.append({"ref": ref, "reason": detail or "unresolvable"})
             else:
                 kept.append(ref)
         new_c = {**c, "evidence_refs": kept}
+        audit: dict[str, list[dict[str, str]]] = {}
         if dropped:
-            new_c["ref_audit"] = {"dropped": dropped}
+            audit["dropped"] = dropped
+        if salvaged:
+            audit["salvaged"] = salvaged
+        if audit:
+            new_c["ref_audit"] = audit
         if new_c.get("severity") == "blocking" and not kept:
             # SKILL rule re-application: blocking needs refs.
             new_c["severity"] = "material"

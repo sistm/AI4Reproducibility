@@ -586,3 +586,172 @@ def test_categories_rubric_checks_required_changes_and_prose():
     rubric = load_skill("critique/references/CATEGORIES.md")
     assert "required_changes" in rubric
     assert "markdown narrative" in rubric or "markdown prose" in rubric
+
+
+# --- patch 0061: salvage malformed JSON-key-path refs --------------------------
+
+
+def test_salvage_keypath_ref_rewrites_dotted_form(tmp_path):
+    """A ref like `ai4r/p/cqv/foo.bar.baz` with no `#` rewrites to point at
+    cqv_output.json's key path — the dominant smoke-run pattern."""
+    from tools.orchestrator.critique import _salvage_keypath_ref
+
+    (tmp_path / "ai4r" / "p" / "cqv").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "cqv" / "cqv_output.json").write_text("{}")
+
+    out = _salvage_keypath_ref(
+        "ai4r/p/cqv/repository_audit.dependency_validation.package_management",
+        tmp_path,
+    )
+    assert out == (
+        "ai4r/p/cqv/cqv_output.json"
+        "#repository_audit.dependency_validation.package_management"
+    )
+
+
+def test_salvage_keypath_ref_handles_bracketed_form(tmp_path):
+    """Brackets in key paths (e.g. `structured_knowledge[].type: gap`) also
+    salvage correctly — they're a valid character class for key paths."""
+    from tools.orchestrator.critique import _salvage_keypath_ref
+
+    (tmp_path / "ai4r" / "p" / "kbe").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "kbe" / "kbe_output.json").write_text("{}")
+
+    out = _salvage_keypath_ref(
+        "ai4r/p/kbe/structured_knowledge[].type: gap",
+        tmp_path,
+    )
+    assert out == "ai4r/p/kbe/kbe_output.json#structured_knowledge[].type: gap"
+
+
+def test_salvage_keypath_ref_handles_bare_word(tmp_path):
+    """A bare word after the stage dir is also a valid key path (top-level
+    key into output.json) — seen in the smoke run for `reproducibility_gaps`."""
+    from tools.orchestrator.critique import _salvage_keypath_ref
+
+    (tmp_path / "ai4r" / "p" / "kbe").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "kbe" / "kbe_output.json").write_text("{}")
+
+    out = _salvage_keypath_ref("ai4r/p/kbe/reproducibility_gaps", tmp_path)
+    assert out == "ai4r/p/kbe/kbe_output.json#reproducibility_gaps"
+
+
+def test_salvage_keypath_ref_skips_already_anchored(tmp_path):
+    """Refs with a `#` are already in canonical form; do not rewrite."""
+    from tools.orchestrator.critique import _salvage_keypath_ref
+
+    (tmp_path / "ai4r" / "p" / "kbe").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "kbe" / "kbe_output.json").write_text("{}")
+
+    assert _salvage_keypath_ref(
+        "ai4r/p/kbe/kbe_output.json#some_key", tmp_path,
+    ) is None
+
+
+def test_salvage_keypath_ref_skips_when_stage_output_missing(tmp_path):
+    """No `*_output.json` on disk -> no salvage (would produce a still-broken ref)."""
+    from tools.orchestrator.critique import _salvage_keypath_ref
+
+    (tmp_path / "ai4r" / "p" / "kbe").mkdir(parents=True)
+    # Note: no kbe_output.json written.
+
+    assert _salvage_keypath_ref("ai4r/p/kbe/some.key", tmp_path) is None
+
+
+def test_salvage_keypath_ref_skips_unknown_stage(tmp_path):
+    """Unknown stage names (no entry in _STAGE_OUTPUT_FILES) get no salvage."""
+    from tools.orchestrator.critique import _salvage_keypath_ref
+
+    (tmp_path / "ai4r" / "p" / "review").mkdir(parents=True)
+    assert _salvage_keypath_ref("ai4r/p/review/some.key", tmp_path) is None
+
+
+def test_salvage_keypath_ref_skips_nested_path_form(tmp_path):
+    """A ref with internal `/` after the stage looks like a real subdir,
+    not a dotted key path — leave it alone."""
+    from tools.orchestrator.critique import _salvage_keypath_ref
+
+    (tmp_path / "ai4r" / "p" / "cqv").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "cqv" / "cqv_output.json").write_text("{}")
+
+    assert _salvage_keypath_ref(
+        "ai4r/p/cqv/subdir/file.txt", tmp_path,
+    ) is None
+
+
+def test_filter_critic_refs_salvages_malformed_keypath(tmp_path):
+    """End-to-end on _filter_critic_refs: a malformed key-path-as-ref is
+    rewritten to canonical form, kept in evidence_refs, and recorded in
+    ref_audit.salvaged. This is the smoke-run scenario."""
+    from tools.orchestrator.critique import _filter_critic_refs
+
+    (tmp_path / "ai4r" / "p" / "cqv").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "cqv" / "cqv_output.json").write_text("{}")
+
+    concerns = [{
+        "id": "K1",
+        "severity": "blocking",
+        "evidence_refs": [
+            "ai4r/p/cqv/repository_audit.dependency_validation",
+        ],
+    }]
+    out = _filter_critic_refs(concerns, tmp_path)
+    assert len(out) == 1
+    c = out[0]
+    # Rewritten ref kept in evidence_refs.
+    assert c["evidence_refs"] == [
+        "ai4r/p/cqv/cqv_output.json#repository_audit.dependency_validation"
+    ]
+    # No "dropped" — the salvage succeeded.
+    assert "dropped" not in c.get("ref_audit", {})
+    # Salvage recorded for visibility.
+    assert c["ref_audit"]["salvaged"] == [{
+        "original": "ai4r/p/cqv/repository_audit.dependency_validation",
+        "rewritten": "ai4r/p/cqv/cqv_output.json#repository_audit.dependency_validation",
+    }]
+    # Severity preserved (blocking has a kept ref now).
+    assert c["severity"] == "blocking"
+
+
+def test_filter_critic_refs_records_both_salvaged_and_dropped(tmp_path):
+    """A concern with a mix of salvageable and truly-broken refs records both
+    categories in ref_audit and keeps only the salvageable one."""
+    from tools.orchestrator.critique import _filter_critic_refs
+
+    (tmp_path / "ai4r" / "p" / "kbe").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "kbe" / "kbe_output.json").write_text("{}")
+    # No cqv_output.json -> the cqv ref can't be salvaged.
+
+    concerns = [{
+        "id": "K1",
+        "severity": "material",
+        "evidence_refs": [
+            "ai4r/p/kbe/reproducibility_gaps",       # salvages
+            "ai4r/p/cqv/some.key",                    # no cqv_output.json, drops
+            "ai4r/p/totally/elsewhere/missing.md",    # truly missing, drops
+        ],
+    }]
+    out = _filter_critic_refs(concerns, tmp_path)
+    c = out[0]
+    assert c["evidence_refs"] == [
+        "ai4r/p/kbe/kbe_output.json#reproducibility_gaps"
+    ]
+    audit = c["ref_audit"]
+    assert "salvaged" in audit and len(audit["salvaged"]) == 1
+    assert "dropped" in audit and len(audit["dropped"]) == 2
+
+
+def test_filter_critic_refs_no_audit_field_when_clean(tmp_path):
+    """No salvage, no drops -> ref_audit not added (existing behaviour)."""
+    from tools.orchestrator.critique import _filter_critic_refs
+
+    (tmp_path / "ai4r" / "p" / "kbe").mkdir(parents=True)
+    (tmp_path / "ai4r" / "p" / "kbe" / "kbe_output.json").write_text("{}")
+
+    concerns = [{
+        "id": "K1",
+        "severity": "material",
+        "evidence_refs": ["ai4r/p/kbe/kbe_output.json"],
+    }]
+    out = _filter_critic_refs(concerns, tmp_path)
+    assert "ref_audit" not in out[0]
