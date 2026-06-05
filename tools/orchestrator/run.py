@@ -127,6 +127,7 @@ def run_pipeline(
             summary["ok"] = False
             summary["failed_at"] = "prepare"
             summary["ended_at"] = _now()
+            summary["result"] = _compute_result(summary)
             return summary
 
     # --- KBE -> CQV (each owns its contract; neither aborts the chain) ------
@@ -160,7 +161,52 @@ def run_pipeline(
         summary["ok"] = None
 
     summary["ended_at"] = _now()
+    summary["result"] = _compute_result(summary)
     return summary
+
+
+# Outcome values for the top-level pipeline ``result`` field (patch 0065).
+# Distinct from ``summary["ok"]`` which retains its narrow "post-flight gate
+# exited 0" meaning — the gate only checks file/key presence, not the health
+# of what's in them. ``result`` is the multi-dimensional pipeline outcome:
+#   PASS    — gate passed AND Review reported assessment_status=complete
+#   PARTIAL — gate passed AND Review reported assessment_status=partial (upstream
+#             degradation visible in the rm but Review itself produced clean
+#             outputs; the run is informative, not broken)
+#   FAIL    — gate failed, OR Review reported assessment_status=failed (which
+#             means 0053 reconciliation tripped: rm/md inconsistent, missing
+#             diffs, etc. — the artifacts are not trustworthy)
+#   SKIPPED — gate was disabled (run_validate=False)
+_RESULT_PASS = "PASS"
+_RESULT_PARTIAL = "PARTIAL"
+_RESULT_FAIL = "FAIL"
+_RESULT_SKIPPED = "SKIPPED"
+
+
+def _compute_result(summary: dict[str, Any]) -> str:
+    """Derive the pipeline outcome from the per-step record (patch 0065).
+
+    The previous behaviour computed PASS purely from the post-flight gate
+    exit code, so a Review whose 0053 reconciliation tripped (rm/md verdict
+    mismatch, missing diffs, ...) would still report PASS as long as the
+    files existed and parsed. That made every degraded smoke print PASS,
+    masking real failures. This function consults the Review's own
+    ``assessment_status`` alongside the gate.
+    """
+    if summary.get("failed_at"):
+        return _RESULT_FAIL
+    ok = summary.get("ok")
+    if ok is None:
+        return _RESULT_SKIPPED
+    if not ok:
+        return _RESULT_FAIL
+    review = summary.get("steps", {}).get("review") or {}
+    status = review.get("assessment_status")
+    if status == "failed":
+        return _RESULT_FAIL
+    if status == "partial":
+        return _RESULT_PARTIAL
+    return _RESULT_PASS
 
 
 def _print_summary(summary: dict[str, Any], root: str, review_title: str) -> None:
@@ -184,8 +230,7 @@ def _print_summary(summary: dict[str, Any], root: str, review_title: str) -> Non
     if "validate" in steps:
         line("validate", f"exit {steps['validate']['exit_code']}")
 
-    ok = summary.get("ok")
-    overall = "PASS" if ok else ("SKIPPED" if ok is None else "FAIL")
+    overall = summary.get("result", _RESULT_FAIL)
     where = f"{root}/ai4r/{review_title}/"
     print(f"result: {overall}  -> {where}")
     if summary.get("failed_at"):
@@ -213,7 +258,11 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = run_pipeline(args.review_title, root=args.root, model=args.model)
     _print_summary(summary, args.root, args.review_title)
-    return 0 if summary.get("ok") else 1
+    # Exit 0 for PASS / PARTIAL / SKIPPED; nonzero only for FAIL. PARTIAL is
+    # information about upstream degradation, not failure — a PARTIAL run
+    # produces trustworthy artifacts (Review correctly surfaces upstream
+    # status) and should not break shell pipelines or CI gates that check $?.
+    return 0 if summary.get("result") != _RESULT_FAIL else 1
 
 
 if __name__ == "__main__":
