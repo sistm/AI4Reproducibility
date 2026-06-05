@@ -228,6 +228,40 @@ _UPSTREAM_SECURITY_NOTICE = (
 _EVIDENCE_SUBDIRS = ("kbe", "cqv", "er", "input")
 
 
+def _summarise_json_top_level(path: Path) -> str | None:
+    """Return a one-line "top-level keys: ..." summary for a JSON file, or
+    ``None`` if the file isn't a parseable JSON object/array (patch 0064).
+
+    The motivating observation: with 0055 the model writes canonical PATH#KEY
+    cites, but it guesses array indices (the smoke had ``reproducibility_gaps[4]``
+    cited twice for unrelated claims). Telling it the actual top-level keys
+    and array lengths gives it concrete anchors instead of guesses.
+
+    Conservative: only top-level keys, capped at 12, with array length shown
+    as ``key[N]``. Nested keys aren't enumerated — that path is too expensive
+    for prompt mass and the Critic can catch deeper guesses if they appear.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict):
+        if not data:
+            return None
+        parts: list[str] = []
+        for key in list(data.keys())[:12]:
+            val = data[key]
+            if isinstance(val, list):
+                parts.append(f"{key}[{len(val)}]")
+            else:
+                parts.append(str(key))
+        suffix = ", ..." if len(data) > 12 else ""
+        return f"top-level keys: {', '.join(parts)}{suffix}"
+    if isinstance(data, list):
+        return f"top-level array, {len(data)} item(s)"
+    return None
+
+
 def _available_evidence_files(review_dir: Path, review_title: str) -> str:
     """Enumerate citable evidence files for prompt injection (patch 0055).
 
@@ -236,6 +270,10 @@ def _available_evidence_files(review_dir: Path, review_title: str) -> str:
     anchor format applies to each. Listing them — with the valid anchor form
     per file type — kills the dominant source of Critic ``evidence_gap``
     concerns.
+
+    Patch 0064 extends each JSON entry with a "top-level keys" summary so the
+    model anchors to real keys instead of guessing indices (see
+    :func:`_summarise_json_top_level`).
 
     Returns a formatted multi-line block ending in a newline, or a single
     placeholder line if no evidence files are present (early-pipeline call,
@@ -253,7 +291,12 @@ def _available_evidence_files(review_dir: Path, review_title: str) -> str:
             rel = prefix + str(p.relative_to(review_dir))
             if p.suffix == ".json":
                 guide = "JSON — cite as PATH#KEY_PATH; NEVER use #L<n>"
-            elif p.suffix in {".md", ".txt"}:
+                lines.append(f"  - {rel}  [{guide}]")
+                summary = _summarise_json_top_level(p)
+                if summary:
+                    lines.append(f"      {summary}")
+                continue
+            if p.suffix in {".md", ".txt"}:
                 try:
                     n_lines = p.read_text(encoding="utf-8").count("\n") + 1
                     guide = f"markdown — cite as PATH#L<n>, 1 <= n <= {n_lines}"

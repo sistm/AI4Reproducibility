@@ -1542,3 +1542,137 @@ def test_run_review_wires_evidence_files_into_checklist_prompt(tmp_path):
     assert "ai4r/p/kbe/kbe_output.json" in cl
     assert "ai4r/p/cqv/cqv_output.json" in cl
     assert "Cite-format discipline" in cl
+
+
+# --- patch 0064: enumerate JSON top-level keys in evidence files block ---
+
+
+def test_summarise_json_top_level_dict_with_arrays(tmp_path):
+    """Top-level keys are listed with array lengths shown as `key[N]` and
+    non-array keys as bare names. Gives the model concrete anchors."""
+    import json
+
+    from tools.orchestrator.review import _summarise_json_top_level
+
+    p = tmp_path / "out.json"
+    p.write_text(json.dumps({
+        "paper_title": "T",
+        "identified_assumptions": [{"a": 1}] * 7,
+        "reproducibility_gaps": ["g"] * 13,
+        "structured_knowledge": ["s"] * 28,
+    }))
+    out = _summarise_json_top_level(p)
+    assert out is not None
+    assert "top-level keys:" in out
+    assert "paper_title" in out
+    assert "identified_assumptions[7]" in out
+    assert "reproducibility_gaps[13]" in out
+    assert "structured_knowledge[28]" in out
+
+
+def test_summarise_json_top_level_dict_empty(tmp_path):
+    """Empty dicts have no informative keys to list — return None."""
+    from tools.orchestrator.review import _summarise_json_top_level
+
+    p = tmp_path / "empty.json"
+    p.write_text("{}")
+    assert _summarise_json_top_level(p) is None
+
+
+def test_summarise_json_top_level_caps_at_12_keys(tmp_path):
+    """Very wide JSON gets capped to keep prompt mass bounded; an ellipsis
+    indicates more keys exist on disk."""
+    import json
+
+    from tools.orchestrator.review import _summarise_json_top_level
+
+    data = {f"k{i}": i for i in range(20)}
+    p = tmp_path / "wide.json"
+    p.write_text(json.dumps(data))
+    out = _summarise_json_top_level(p)
+    assert out is not None
+    assert "..." in out
+    # First 12 keys listed (insertion order in modern Python dicts).
+    assert "k0" in out and "k11" in out
+    assert "k12" not in out
+
+
+def test_summarise_json_top_level_top_level_array(tmp_path):
+    """A bare top-level array (rare but valid JSON) reports its length."""
+    import json
+
+    from tools.orchestrator.review import _summarise_json_top_level
+
+    p = tmp_path / "arr.json"
+    p.write_text(json.dumps([1, 2, 3, 4]))
+    out = _summarise_json_top_level(p)
+    assert out == "top-level array, 4 item(s)"
+
+
+def test_summarise_json_top_level_malformed_returns_none(tmp_path):
+    """Malformed JSON returns None (no crash) so the helper falls back to
+    bare 'cite as PATH#KEY_PATH' guidance."""
+    from tools.orchestrator.review import _summarise_json_top_level
+
+    p = tmp_path / "bad.json"
+    p.write_text("{ malformed")
+    assert _summarise_json_top_level(p) is None
+
+
+def test_summarise_json_top_level_unicode_error_safe(tmp_path):
+    """Bytes that aren't valid UTF-8 don't crash the helper."""
+    from tools.orchestrator.review import _summarise_json_top_level
+
+    p = tmp_path / "binary.json"
+    p.write_bytes(b"\xff\xfe not utf-8")
+    assert _summarise_json_top_level(p) is None
+
+
+def test_available_evidence_files_includes_json_key_summary(tmp_path):
+    """End-to-end on the enumerator: each JSON file gets a follow-up
+    'top-level keys: ...' line below its main listing entry."""
+    import json
+
+    from tools.orchestrator.review import _available_evidence_files
+
+    base = tmp_path / "ai4r" / "p"
+    (base / "kbe").mkdir(parents=True)
+    (base / "kbe" / "kbe_output.json").write_text(json.dumps({
+        "paper_title": "T",
+        "reproducibility_gaps": ["g"] * 13,
+        "identified_assumptions": [{"a": 1}] * 7,
+    }))
+    (base / "cqv").mkdir()
+    (base / "cqv" / "cqv_output.json").write_text(json.dumps({
+        "repository_audit": {"x": 1},
+        "statistical_validity": ["s"] * 5,
+    }))
+
+    out = _available_evidence_files(base, "p")
+    lines = out.splitlines()
+
+    # kbe block: the listing line is followed by the key summary line.
+    kbe_idx = next(i for i, line in enumerate(lines) if "kbe_output.json" in line)
+    assert "top-level keys:" in lines[kbe_idx + 1]
+    assert "reproducibility_gaps[13]" in lines[kbe_idx + 1]
+    assert "identified_assumptions[7]" in lines[kbe_idx + 1]
+
+    # cqv block: same pattern.
+    cqv_idx = next(i for i, line in enumerate(lines) if "cqv_output.json" in line)
+    assert "top-level keys:" in lines[cqv_idx + 1]
+    assert "statistical_validity[5]" in lines[cqv_idx + 1]
+    assert "repository_audit" in lines[cqv_idx + 1]
+
+
+def test_available_evidence_files_skips_summary_on_malformed_json(tmp_path):
+    """Malformed JSON: listing line stays, summary line is omitted (no crash,
+    no misleading guide)."""
+    from tools.orchestrator.review import _available_evidence_files
+
+    base = tmp_path / "ai4r" / "p"
+    (base / "kbe").mkdir(parents=True)
+    (base / "kbe" / "kbe_output.json").write_text("{ malformed")
+
+    out = _available_evidence_files(base, "p")
+    assert "kbe_output.json" in out
+    assert "top-level keys" not in out
