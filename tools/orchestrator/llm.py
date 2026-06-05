@@ -14,6 +14,7 @@ orchestrator portable across providers (and off LiteLLM entirely, if needed).
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -22,6 +23,12 @@ from typing import Any
 # A tool spec in OpenAI "tools" format. Kept as a plain dict so we never couple
 # to a provider's typing. Built from the tool registry in a later step.
 ToolSpec = dict[str, Any]
+
+# Module logger. By default Python writes WARNING+ to stderr with no
+# configuration, so retry events surface without the user setting LITELLM_LOG=
+# DEBUG. INFO-level events (success-after-retry) are hidden by default but
+# available to anyone who configures the logger.
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -145,14 +152,40 @@ def _litellm_complete(
     # a section. A small self-contained loop keeps retries working with no extra
     # dependency. Only transient errors are retried (rate-limit/timeout/5xx);
     # 4xx classes like auth or bad-request fail-fast — see _is_transient.
+    #
+    # Patch 0060d: every retry decision is logged so post-mortem analysis can
+    # tell whether retries fired at all and how many burned before give-up. The
+    # smoke run that motivated 0060c made this concrete: without per-attempt
+    # logging it's impossible to distinguish "retry budget too small" from
+    # "retry wiring broken" on a Synthesiser-Call-2 failure.
     for attempt in range(eff_retries + 1):
         try:
             response = litellm.completion(**kwargs)
+            if attempt > 0:
+                _logger.info(
+                    "litellm.completion succeeded on retry %d/%d",
+                    attempt, eff_retries,
+                )
             break
         except Exception as exc:
-            if attempt >= eff_retries or not _is_transient(exc):
+            transient = _is_transient(exc)
+            if attempt >= eff_retries or not transient:
+                _logger.error(
+                    "litellm.completion giving up at attempt %d/%d "
+                    "(transient=%s, retries_remaining=%d): %s: %s",
+                    attempt, eff_retries, transient,
+                    max(0, eff_retries - attempt),
+                    type(exc).__name__, exc,
+                )
                 raise
-            time.sleep(min(2 ** attempt, eff_cap))
+            sleep_s = min(2 ** attempt, eff_cap)
+            _logger.warning(
+                "litellm.completion attempt %d/%d failed (%s: %s); "
+                "retrying after %ds (budget=%d, cap=%ds)",
+                attempt, eff_retries, type(exc).__name__, exc,
+                sleep_s, eff_retries, eff_cap,
+            )
+            time.sleep(sleep_s)
     message = response.choices[0].message
 
     calls: list[ToolCall] = []

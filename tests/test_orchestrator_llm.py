@@ -499,3 +499,118 @@ def test_with_retry_policy_backoff_cap_none_falls_back_to_config(monkeypatch):
         policy_fn("m", [{"role": "user", "content": "x"}], [])
     # 3 retries -> 3 sleeps, capped at 2: 1, 2, 2.
     assert sleeps == [1, 2, 2]
+
+
+# --- patch 0060d: retry diagnostic logging ---
+
+
+def test_litellm_logs_each_transient_retry(monkeypatch, caplog):
+    """Each transient failure that's about to be retried emits a WARNING with
+    attempt number, exception class, sleep duration, and budget — so a
+    post-mortem can tell exactly how many attempts burned.
+    """
+    import sys
+    import time as _time
+    import types
+
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+
+    calls = {"n": 0}
+    resp = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(
+            message=types.SimpleNamespace(content="ok", tool_calls=None),
+            finish_reason="stop",
+        )]
+    )
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("transient blip")
+        return resp
+
+    fake = types.ModuleType("litellm")
+    fake.completion = flaky
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "5")
+    monkeypatch.setenv("AI4R_BACKOFF_CAP", "1")
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with caplog.at_level("INFO", logger="tools.orchestrator.llm"):
+        _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+
+    # Two retry WARNINGs (attempts 0 and 1 failed, attempt 2 succeeded).
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2
+    for i, rec in enumerate(warnings):
+        # The log message names the attempt index and exception class.
+        assert "RuntimeError" in rec.getMessage()
+        assert f"attempt {i}/5" in rec.getMessage()
+    # And one INFO message for the success-on-retry path.
+    infos = [r for r in caplog.records if r.levelname == "INFO"]
+    assert len(infos) == 1
+    assert "succeeded on retry 2/5" in infos[0].getMessage()
+
+
+def test_litellm_logs_give_up_after_budget_exhausted(monkeypatch, caplog):
+    """When retries exhaust, the final exception emits ERROR (not WARNING)
+    so the give-up is distinguishable from a retry-and-recover."""
+    import sys
+    import time as _time
+    import types
+
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+
+    def always_fail(**kw):
+        raise RuntimeError("persistent blip")
+
+    fake = types.ModuleType("litellm")
+    fake.completion = always_fail
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "2")
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with caplog.at_level("WARNING", logger="tools.orchestrator.llm"):
+        with pytest.raises(RuntimeError):
+            _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+
+    # 2 retries -> 2 WARNINGs + 1 ERROR for the final give-up.
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(warnings) == 2
+    assert len(errors) == 1
+    assert "giving up at attempt 2/2" in errors[0].getMessage()
+    assert "transient=True" in errors[0].getMessage()
+
+
+def test_litellm_logs_non_transient_failure_immediately(monkeypatch, caplog):
+    """A non-transient (401, etc.) gives up on attempt 0 with ERROR and
+    no WARNING — confirms the retry loop didn't burn budget unnecessarily."""
+    import sys
+    import types
+
+    class AuthError(Exception):
+        status_code = 401
+
+    def always_401(**kw):
+        raise AuthError("bad key")
+
+    fake = types.ModuleType("litellm")
+    fake.completion = always_401
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.setenv("AI4R_NUM_RETRIES", "5")
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with caplog.at_level("WARNING", logger="tools.orchestrator.llm"):
+        with pytest.raises(AuthError):
+            _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert warnings == []  # no retry log
+    assert len(errors) == 1
+    assert "giving up at attempt 0/5" in errors[0].getMessage()
+    assert "transient=False" in errors[0].getMessage()
