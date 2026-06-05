@@ -154,3 +154,128 @@ def test_user_prompt_tags_file_contents_as_untrusted():
     assert "SECURITY" in prompt
     assert "untrusted" in prompt
     assert "read_file" in prompt  # the specific tool whose returns are tainted
+
+
+# --- patch 0054: CQV output structural schema -------------------------------
+
+
+def test_assert_output_schema_accepts_canonical_shape():
+    """A well-formed CQV output (canonical evidence shape) passes schema —
+    this is the post-coercion contract that the K1 smoke failure motivated."""
+    from tools.orchestrator.cqv import _assert_output_schema
+
+    obj = {
+        "paper_id": "p",
+        "status": "success",
+        "failure_mode": None,
+        "failure_reason": None,
+        "reproducibility_blockers": [
+            {
+                "id": "bj-10-set-seed",
+                "severity": "HIGH",
+                "description": "No set.seed() in main.R",
+                "evidence": [{"file": "main.R", "line": 12}],
+            },
+        ],
+    }
+    _assert_output_schema(obj)  # no raise = pass
+
+
+def test_assert_output_schema_rejects_string_shaped_evidence():
+    """The K1 smoke failure: a blocker with string-shaped evidence (legacy
+    form) reaches downstream Critic and confuses cite resolution. Schema
+    catches it now — if _coerce_evidence regresses, this fires immediately."""
+    import pytest
+
+    from tools.orchestrator.cqv import _assert_output_schema
+
+    obj = {
+        "paper_id": "p",
+        "status": "partial",
+        "reproducibility_blockers": [
+            {
+                "id": "bj-10",
+                "severity": "HIGH",
+                "description": "no seed",
+                "evidence": "main.R:12",  # legacy string form — bug if it reaches here
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match=r"patch 0054"):
+        _assert_output_schema(obj)
+
+
+def test_assert_output_schema_rejects_evidence_object_missing_file():
+    """Object-list shape with missing required keys (file/line) fails too —
+    catches partial-coercion regressions where the wrapping list is right but
+    the inner object is malformed."""
+    import pytest
+
+    from tools.orchestrator.cqv import _assert_output_schema
+
+    obj = {
+        "paper_id": "p",
+        "status": "partial",
+        "reproducibility_blockers": [
+            {
+                "id": "bj-10",
+                "severity": "HIGH",
+                "description": "no seed",
+                "evidence": [{"line": 12}],  # missing 'file'
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match=r"patch 0054"):
+        _assert_output_schema(obj)
+
+
+def test_assert_output_schema_rejects_unknown_status():
+    """Status enum is strict: success/partial/failed only. Anything else
+    (e.g. model output drift to 'ok' or 'error') is a bug."""
+    import pytest
+
+    from tools.orchestrator.cqv import _assert_output_schema
+
+    obj = {"paper_id": "p", "status": "ok", "reproducibility_blockers": []}
+    with pytest.raises(ValueError, match=r"patch 0054"):
+        _assert_output_schema(obj)
+
+
+def test_assert_output_schema_accepts_id_less_blocker():
+    """Defensive: id-less blockers still go through (the dedup code keeps
+    them). Schema doesn't require id — invariant is about evidence shape
+    when present, not about every field being filled."""
+    from tools.orchestrator.cqv import _assert_output_schema
+
+    obj = {
+        "paper_id": "p",
+        "status": "partial",
+        "reproducibility_blockers": [
+            {"severity": "HIGH", "description": "anonymous blocker"},
+        ],
+    }
+    _assert_output_schema(obj)  # no raise
+
+
+def test_run_cqv_with_string_shape_evidence_is_coerced_and_passes(tmp_path):
+    """End-to-end: a model that returns string-shape evidence (the K1 pattern)
+    gets coerced by _normalise before reaching the schema check — full pipeline
+    still succeeds. This is the success criterion patch 0054 was designed for:
+    legacy-shape model output normalises silently to canonical shape."""
+    _seed_assets(tmp_path, "legacy-shape")
+    legacy_output = json.dumps({
+        "status": "partial",
+        "reproducibility_blockers": [
+            {
+                "id": "bj-10-set-seed",
+                "severity": "HIGH",
+                "description": "no seed",
+                "evidence": "main.R:12",  # string form from model
+            },
+        ],
+    })
+    out = run_cqv("legacy-shape", root=tmp_path, complete_fn=_fake_returning(legacy_output))
+    # Coercion produced canonical object-list shape; schema validation accepted it.
+    blocker = next(b for b in out["reproducibility_blockers"] if b.get("id") == "bj-10-set-seed")
+    assert isinstance(blocker["evidence"], list)
+    assert blocker["evidence"][0] == {"file": "main.R", "line": 12}

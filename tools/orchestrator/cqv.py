@@ -161,6 +161,49 @@ def _default_blocker(reason: str | None) -> dict[str, Any]:
     }
 
 
+# CQV output structural schema (patch 0054). Lazy-loaded singleton: parsed once
+# per process on first use, then cached. Validator runs at the end of
+# :func:`_normalise` so any drift in coercion (or any code path that
+# constructs a blocker bypassing the helpers) is caught at the contract
+# boundary rather than slipping into downstream consumers — the latter is
+# exactly the failure mode that produced the K1 cite-shape confusion in the
+# bimj_202400278 smoke run.
+_SCHEMA_PATH = Path(__file__).parent.parent.parent / "cqv_output.schema.json"
+_SCHEMA_CACHE: dict[str, Any] | None = None
+
+
+def _output_schema() -> dict[str, Any]:
+    global _SCHEMA_CACHE
+    if _SCHEMA_CACHE is None:
+        _SCHEMA_CACHE = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    return _SCHEMA_CACHE
+
+
+def _assert_output_schema(obj: dict[str, Any]) -> None:
+    """Validate the CQV output against :file:`cqv_output.schema.json` (patch 0054).
+
+    Treats violations as coding bugs rather than user errors: by the time this
+    runs, model output has been parsed AND coerced — anything still wrong is
+    something we shipped, not something the model emitted. Raising here forces
+    investigation rather than silently passing malformed evidence downstream
+    (the failure mode that motivated the patch in the first place).
+
+    ``jsonschema`` is already a hard dependency, so the import is fine at this
+    layer — no lazy-import dance needed.
+    """
+    import jsonschema
+
+    try:
+        jsonschema.validate(instance=obj, schema=_output_schema())
+    except jsonschema.ValidationError as exc:
+        # jsonschema's default message includes the failing path and value,
+        # which is exactly what's useful for debugging coercion regressions.
+        raise ValueError(
+            f"CQV output failed structural schema (patch 0054): {exc.message} "
+            f"at {'.'.join(str(p) for p in exc.absolute_path) or '<root>'}"
+        ) from exc
+
+
 def _failure_output(
     review_title: str, failure_mode: str, failure_reason: str, status: str = "failed"
 ) -> dict[str, Any]:
@@ -267,6 +310,12 @@ def _normalise(obj: dict[str, Any], review_title: str) -> dict[str, Any]:
     # rule 5: a non-success status must always carry at least one blocker.
     if obj["status"] != "success" and not obj["reproducibility_blockers"]:
         obj["reproducibility_blockers"] = [_default_blocker(obj.get("failure_reason"))]
+    # Patch 0054: structural-invariant check on what we're about to return.
+    # By here, model JSON has been parsed, _coerce_evidence has run, and the
+    # internal emitters (_default_blocker, _stat_blocker) have produced
+    # object-list shapes. Any schema failure now is a coding bug — fail loud
+    # rather than ship malformed evidence to Critic/Review.
+    _assert_output_schema(obj)
     return obj
 
 

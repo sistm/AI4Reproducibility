@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sistm/AI4Reproducibility/blob/main/cqv_output.schema.json",
+  "title": "AI4R CQV Output",
+  "description": "Structural invariants for cqv_output.json — patch 0054. Intentionally narrow: locks down only the fields whose drift causes downstream confusion (evidence shape after 0058's coercion). Does NOT enforce the full vocabulary of every field; CQV's output evolves and over-constraint would force schema churn on every new field.",
+  "type": "object",
+  "required": ["paper_id", "status", "reproducibility_blockers"],
+  "properties": {
+    "paper_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stage owner per validate_review.sh contract."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "partial", "failed"],
+      "description": "Stage outcome. Anything else is a bug — KBE/CQV/Review all share this trio."
+    },
+    "failure_mode": {
+      "anyOf": [{"type": "string"}, {"type": "null"}],
+      "description": "Free-form code for non-success runs; null for success."
+    },
+    "failure_reason": {
+      "anyOf": [{"type": "string"}, {"type": "null"}],
+      "description": "Human-readable explanation paired with failure_mode."
+    },
+    "reproducibility_blockers": {
+      "type": "array",
+      "description": "Issues that block reproducibility. After 0058 coercion + 0054 schema this is uniform across both model-emitted and helper-emitted entries.",
+      "items": {
+        "type": "object",
+        "required": ["severity", "description"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional: id-less blockers exist as a defensive path through dedup; cite-mapping skips them downstream."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Canonical object-list shape (patch 0054 invariant). Legacy string and list-of-strings forms must be coerced via _coerce_evidence before this point. Field itself is optional — the K1 failure mode was inconsistent SHAPE when present, not absence.",
+            "items": {
+              "type": "object",
+              "required": ["file", "line"],
+              "properties": {
+                "file": {"type": "string", "minLength": 1},
+                "line": {"type": "integer", "minimum": 0},
+                "snippet": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
