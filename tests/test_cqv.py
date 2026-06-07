@@ -279,3 +279,79 @@ def test_run_cqv_with_string_shape_evidence_is_coerced_and_passes(tmp_path):
     blocker = next(b for b in out["reproducibility_blockers"] if b.get("id") == "bj-10-set-seed")
     assert isinstance(blocker["evidence"], list)
     assert blocker["evidence"][0] == {"file": "main.R", "line": 12}
+
+
+# --- patch 0066: doubled-key stutter pre-pass in CQV --------------------------
+
+
+def test_run_cqv_silently_normalises_pure_stutter(tmp_path):
+    """When the model emits ONE doubled-key stutter and nothing else is wrong,
+    CQV reports the model's actual status (no `failure_mode` taint), preserves
+    no raw_model_output (the artifact is well-understood and the fix is
+    deterministic), and surfaces the count in notes. This is the win case
+    patch 0066 targets — `output_recovered_by_repair` stops firing on routine
+    token stutters."""
+    _seed_assets(tmp_path, "stutter-only")
+    stuttered = json.dumps({
+        "status": "success",
+        "reproducibility_blockers": [],
+        "repository_audit": [],
+    }).replace(
+        # Inject a single doubled-key stutter in an evidence-list shaped value
+        '"status": "success"',
+        '"status": "status": "success"',
+    )
+    out = run_cqv("stutter-only", root=tmp_path, complete_fn=_fake_returning(stuttered))
+    # Model's `status: success` survives — no repair-recovered taint.
+    assert out["status"] == "success"
+    assert out.get("failure_mode") is None
+    # raw_model_output NOT preserved on the pure-stutter path.
+    assert "raw_model_output" not in out
+    # Notes record the normalisation for the audit trail.
+    assert "patch 0066" in out["notes"]
+    assert "1 doubled-key stutter" in out["notes"]
+
+
+def test_run_cqv_records_stutter_count_alongside_repair_when_both_happen(tmp_path):
+    """When the model emits a stutter AND has another structural problem
+    (e.g. truncation), both markers appear in notes — the audit trail
+    distinguishes 'model stuttered + got truncated' from 'model emitted
+    structurally broken JSON unrelated to known artifacts'. This is the
+    smoke-C scenario (one stutter + a bracket mismatch from truncation)."""
+    _seed_assets(tmp_path, "stutter-plus-truncation")
+    # Stutter inside a still-malformed payload: json_repair has to step in.
+    # The trailing comma + missing closing brace forces the deterministic
+    # repair to run after the stutter has already been stripped.
+    payload = (
+        '{"status": "status": "partial", '
+        '"reproducibility_blockers": [{"id": "x", "severity": "HIGH", '
+        '"description": "y", "evidence": [{"file": "main.R", "line": 1}]}],'
+    )
+    out = run_cqv(
+        "stutter-plus-truncation", root=tmp_path,
+        complete_fn=_fake_returning(payload),
+    )
+    # Repair fired for the truncation, so failure_mode is set.
+    assert out["failure_mode"] == "output_recovered_by_repair"
+    # raw_model_output preserved (original, pre-stutter-strip) for human verification.
+    assert "raw_model_output" in out
+    assert '"status": "status":' in out["raw_model_output"]  # original stutter preserved
+    # Both markers visible in notes.
+    notes = out["notes"]
+    assert "patch 0066" in notes
+    assert "recovered from malformed JSON" in notes
+
+
+def test_run_cqv_clean_output_emits_no_stutter_marker(tmp_path):
+    """When the model emits well-formed output with no stutter, no patch-0066
+    marker appears in notes. Confirms the marker isn't added speculatively."""
+    _seed_assets(tmp_path, "clean")
+    clean = json.dumps({
+        "status": "success",
+        "reproducibility_blockers": [],
+        "repository_audit": [],
+    })
+    out = run_cqv("clean", root=tmp_path, complete_fn=_fake_returning(clean))
+    assert out["status"] == "success"
+    assert out.get("failure_mode") is None
+    assert "patch 0066" not in out.get("notes", "")

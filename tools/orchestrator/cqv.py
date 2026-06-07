@@ -38,6 +38,7 @@ from tools.orchestrator._stage import (
     load_skill,
     now_iso,
     parse_json_object,
+    strip_doubled_key_stutter,
 )
 from tools.orchestrator.config import model_for
 from tools.orchestrator.llm import CompleteFn, run_agent
@@ -486,19 +487,28 @@ def run_cqv(
         return output
 
     repaired_via: str | None = None
+    # Patch 0066: collapse the doubled-key stutter (`"X": "X":` → `"X":`)
+    # before parsing. This is a known autoregressive token-prediction artifact
+    # in mistral-small CQV output — typically one slip per ~5-6 KB of evidence
+    # list. Stripping it before parse means a single-stutter run produces
+    # valid JSON without firing the `output_recovered_by_repair` flag, so
+    # that flag stays meaningful for runs with content-bearing failures
+    # (truncation, missing keys, broken nesting). The stutter count goes into
+    # `notes` for observability either way — see below.
+    text_for_parse, stutter_fixes = strip_doubled_key_stutter(text)
     try:
-        parsed = parse_json_object(text)
+        parsed = parse_json_object(text_for_parse)
     except (ValueError, json.JSONDecodeError) as exc:
         # Salvage a structurally-malformed but complete audit rather than discard
         # it (LOGIC.md §6 degrade). Deterministic repair first — no model round
         # trip, fixes missing commas / array-object confusion / trailing commas —
         # then one model reprompt, and only then give up.
-        parsed = _repair_json_deterministic(text)
+        parsed = _repair_json_deterministic(text_for_parse)
         if parsed is not None:
             repaired_via = "deterministic"
         else:
             parsed = _repair_json_once(
-                text, exc, model=model or model_for("cqv"), complete_fn=complete_fn
+                text_for_parse, exc, model=model or model_for("cqv"), complete_fn=complete_fn
             )
             if parsed is not None:
                 repaired_via = "reprompt"
@@ -507,6 +517,8 @@ def run_cqv(
                 review_title, "output_parse_failed",
                 f"model output was not valid JSON: {exc}", status="partial",
             )
+            # Always preserve the ORIGINAL model output here (not the pre-pass
+            # cleaned text), so future analysis can see exactly what was emitted.
             output["notes"] = f"Raw model output:\n{text}"
             _write_outputs(review_dir, output)
             return output
@@ -522,7 +534,19 @@ def run_cqv(
             "raw model output retained in raw_model_output for verification]"
         )
         output["notes"] = f"{marker}\n{output.get('notes', '')}".strip()
-        output["raw_model_output"] = text
+        output["raw_model_output"] = text  # original, pre-stutter-strip
+    if stutter_fixes > 0:
+        # Patch 0066: always surface the stutter count, regardless of whether
+        # other repair also fired. Stutter alone produces a clean parse → only
+        # this note, no `failure_mode`. Stutter + other issues (e.g. truncation)
+        # also fires the repair flag above but still records the stutter count
+        # here, so the audit trail distinguishes "model stuttered once + got
+        # truncated" from "model emitted structurally broken JSON".
+        marker = (
+            f"[patch 0066: normalised {stutter_fixes} doubled-key stutter(s) "
+            "via deterministic pre-pass; not a content failure]"
+        )
+        output["notes"] = f"{marker}\n{output.get('notes', '')}".strip()
     _rehydrate_evidence(output, assets_dir)
     _apply_stat_layer(
         output, review_dir, assets_dir, model=model, complete_fn=complete_fn

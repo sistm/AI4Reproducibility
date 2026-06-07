@@ -80,6 +80,35 @@ _REPAIR_SYSTEM = (
 )
 
 
+# Regex for the doubled-key stutter pattern (patch 0066). Token-prediction
+# artifact: after several `{"X": "...",` entries in close succession, the model
+# occasionally emits the literal key word as a value before continuing with the
+# real key — producing `"X": "X":`. Provably never valid JSON (no comma or
+# brace between key and "next key"), so collapsing this exact form to `"X":`
+# is structurally safe. Pattern is intentionally strict: word-only key
+# (`\w+`), then optional whitespace, then the SAME word quoted and followed
+# by a colon. Anything else — including legitimate `{"file": "file"}` where
+# the value happens to equal the key — stays untouched.
+_DOUBLED_KEY_STUTTER = re.compile(r'"(\w+)":\s*"\1":')
+
+
+def strip_doubled_key_stutter(text: str) -> tuple[str, int]:
+    """Collapse `"X": "X":` to `"X":`; return (cleaned_text, fix_count).
+
+    Defensive pre-pass for JSON parsing — see :data:`_DOUBLED_KEY_STUTTER` for
+    the artifact this catches. Surfacing the fix count lets callers record
+    that normalisation happened without flagging the whole output as
+    "recovered" — the stutter is a well-understood model quirk, not a
+    content-bearing failure that warrants `output_recovered_by_repair`.
+
+    Idempotent and side-effect-free: running it twice yields the same
+    output as running it once, and on stutter-free text it returns the
+    input verbatim with count 0.
+    """
+    cleaned, n = _DOUBLED_KEY_STUTTER.subn(r'"\1":', text)
+    return cleaned, n
+
+
 def _repair_json_deterministic(text: str) -> dict[str, Any] | None:
     """Best-effort structural repair of malformed model JSON — no model call.
 

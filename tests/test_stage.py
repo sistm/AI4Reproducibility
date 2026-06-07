@@ -71,3 +71,91 @@ def test_append_log_creates_dir_and_timestamps(tmp_path):
         from datetime import datetime
 
         datetime.fromisoformat(ts)  # raises if not a valid timestamp
+
+
+# --- patch 0066: doubled-key stutter pre-pass --------------------------------
+
+
+def test_strip_doubled_key_stutter_no_match_returns_input_unchanged():
+    """Stutter-free text is returned verbatim with count 0 — confirms the
+    pre-pass is a no-op on healthy output (its dominant case)."""
+    from tools.orchestrator._stage import strip_doubled_key_stutter
+
+    healthy = '{"status": "success", "items": [{"file": "main.R", "line": 12}]}'
+    out, n = strip_doubled_key_stutter(healthy)
+    assert out == healthy
+    assert n == 0
+
+
+def test_strip_doubled_key_stutter_fixes_single_occurrence():
+    """The exact smoke-C pattern: `"file": "file":` collapses to `"file":`."""
+    from tools.orchestrator._stage import strip_doubled_key_stutter
+
+    stuttered = '{"file": "file": "code/DoFiguresTables.R", "line": 26}'
+    out, n = strip_doubled_key_stutter(stuttered)
+    assert out == '{"file": "code/DoFiguresTables.R", "line": 26}'
+    assert n == 1
+
+
+def test_strip_doubled_key_stutter_fixes_multiple_occurrences():
+    """Multiple stutters in one payload all get collapsed; count reflects the
+    total (matters for the observability marker in CQV notes)."""
+    from tools.orchestrator._stage import strip_doubled_key_stutter
+
+    multi = (
+        '{"file": "file": "a.R", "line": 1}, '
+        '{"file": "b.R", "line": 2}, '
+        '{"file": "file": "c.R", "line": 3}'
+    )
+    out, n = strip_doubled_key_stutter(multi)
+    assert n == 2
+    assert '"file": "file"' not in out
+
+
+def test_strip_doubled_key_stutter_works_on_any_word_key():
+    """The pattern is key-name-agnostic (matches via backreference). Future
+    runs that stutter on `line` or `id` get the same fix without code changes."""
+    from tools.orchestrator._stage import strip_doubled_key_stutter
+
+    for key in ("line", "id", "severity"):
+        stuttered = f'{{"{key}": "{key}": "value"}}'
+        out, n = strip_doubled_key_stutter(stuttered)
+        assert n == 1
+        assert out == f'{{"{key}": "value"}}'
+
+
+def test_strip_doubled_key_stutter_preserves_legitimate_matching_value():
+    """A value that happens to equal its key (e.g. `{"file": "file"}` where the
+    file IS literally named "file") is NOT modified. The stutter pattern
+    requires a trailing colon after the second occurrence — which is invalid
+    JSON in any case where the second `"file"` is a value."""
+    from tools.orchestrator._stage import strip_doubled_key_stutter
+
+    legitimate = '{"file": "file", "line": 1}'  # value just happens to equal key
+    out, n = strip_doubled_key_stutter(legitimate)
+    assert out == legitimate
+    assert n == 0
+
+
+def test_strip_doubled_key_stutter_is_idempotent():
+    """Applying twice yields the same result as once — important because the
+    helper sits in a hot path and may be hit multiple times in test setups."""
+    from tools.orchestrator._stage import strip_doubled_key_stutter
+
+    stuttered = '{"file": "file": "x.R", "line": 1}'
+    once, n1 = strip_doubled_key_stutter(stuttered)
+    twice, n2 = strip_doubled_key_stutter(once)
+    assert once == twice
+    assert n1 == 1
+    assert n2 == 0
+
+
+def test_strip_doubled_key_stutter_tolerates_whitespace_between():
+    """`"X":\\n"X":` (whitespace, including newlines, between key and stutter)
+    still matches — handles models that pretty-print across line breaks."""
+    from tools.orchestrator._stage import strip_doubled_key_stutter
+
+    stuttered = '{"file":\n  "file":\n  "x.R"}'
+    out, n = strip_doubled_key_stutter(stuttered)
+    assert n == 1
+    assert '"file"' in out and '"file": "file"' not in out
