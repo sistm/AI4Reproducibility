@@ -195,6 +195,29 @@ def _litellm_complete(
         calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
 
     finish_reason = getattr(response.choices[0], "finish_reason", None)
+    # Patch 0067: surface output truncation as a WARNING. ``finish_reason ==
+    # "length"`` is the smoking gun for hitting the max_tokens cap mid-emission
+    # — the model wanted to keep going but was cut off. Downstream behaviour
+    # depends on the caller: CQV deterministic-repair will salvage some
+    # truncated output but lose any content past the cut, which is exactly the
+    # smoke-C pattern (raw ended mid-object, json_repair kept ``status`` +
+    # ``repository_audit`` and dropped everything after). Without this log the
+    # cap is invisible — the artifact looks like generic "model emitted bad
+    # JSON" rather than "we asked for too much in one shot".
+    if finish_reason == "length":
+        _logger.warning(
+            "litellm.completion hit max_tokens cap (finish_reason=length); "
+            "output truncated at %d chars. Bump AI4R_MAX_TOKENS or shrink the "
+            "prompt. Currently max_tokens=%d",
+            len(message.content or ""), config.max_tokens(),
+        )
+    elif finish_reason not in (None, "stop", "tool_calls"):
+        # Anything else (e.g. "content_filter", a provider-specific code, ...)
+        # is unusual enough to surface — INFO not WARNING so it doesn't drown
+        # the logs but is visible to anyone looking.
+        _logger.info(
+            "litellm.completion unusual finish_reason=%r", finish_reason,
+        )
     return LLMResponse(text=message.content, tool_calls=calls, finish_reason=finish_reason)
 
 

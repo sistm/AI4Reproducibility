@@ -614,3 +614,111 @@ def test_litellm_logs_non_transient_failure_immediately(monkeypatch, caplog):
     assert len(errors) == 1
     assert "giving up at attempt 0/5" in errors[0].getMessage()
     assert "transient=False" in errors[0].getMessage()
+
+
+# --- patch 0067: surface finish_reason on truncation / unusual values ---
+
+
+def test_litellm_warns_on_length_finish_reason(monkeypatch, caplog):
+    """`finish_reason == "length"` is the smoking gun for hitting max_tokens
+    mid-emission — surfaces as WARNING with the chars-emitted count and the
+    current cap, so the operator immediately knows what to bump."""
+    import sys
+    import types
+
+    msg = types.SimpleNamespace(content="x" * 1234, tool_calls=None)
+    resp = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=msg, finish_reason="length")]
+    )
+
+    def returns_truncated(**kw):
+        return resp
+
+    fake = types.ModuleType("litellm")
+    fake.completion = returns_truncated
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    monkeypatch.setenv("AI4R_MAX_TOKENS", "12000")
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with caplog.at_level("WARNING", logger="tools.orchestrator.llm"):
+        out = _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+
+    assert out.finish_reason == "length"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    msg_text = warnings[0].getMessage()
+    assert "finish_reason=length" in msg_text
+    assert "1234 chars" in msg_text
+    assert "max_tokens=12000" in msg_text
+    assert "AI4R_MAX_TOKENS" in msg_text  # actionable knob named
+
+
+def test_litellm_does_not_warn_on_normal_stop(monkeypatch, caplog):
+    """`finish_reason == "stop"` is the happy path — no log noise."""
+    import sys
+    import types
+
+    msg = types.SimpleNamespace(content="ok", tool_calls=None)
+    resp = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=msg, finish_reason="stop")]
+    )
+
+    fake = types.ModuleType("litellm")
+    fake.completion = lambda **kw: resp
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with caplog.at_level("INFO", logger="tools.orchestrator.llm"):
+        _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+
+    assert caplog.records == []
+
+
+def test_litellm_does_not_warn_on_tool_calls_finish(monkeypatch, caplog):
+    """`finish_reason == "tool_calls"` is the agent-loop normal case — no noise."""
+    import sys
+    import types
+
+    msg = types.SimpleNamespace(content="", tool_calls=None)
+    resp = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=msg, finish_reason="tool_calls")]
+    )
+
+    fake = types.ModuleType("litellm")
+    fake.completion = lambda **kw: resp
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with caplog.at_level("INFO", logger="tools.orchestrator.llm"):
+        _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+
+    assert caplog.records == []
+
+
+def test_litellm_info_on_unusual_finish_reason(monkeypatch, caplog):
+    """Provider-specific or unknown finish_reason values (e.g. 'content_filter',
+    'error') get an INFO log — visible to anyone looking but not noisy enough
+    to drown the WARNING channel."""
+    import sys
+    import types
+
+    msg = types.SimpleNamespace(content="...", tool_calls=None)
+    resp = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=msg, finish_reason="content_filter")]
+    )
+
+    fake = types.ModuleType("litellm")
+    fake.completion = lambda **kw: resp
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+
+    from tools.orchestrator.llm import _litellm_complete
+
+    with caplog.at_level("INFO", logger="tools.orchestrator.llm"):
+        _litellm_complete("m", [{"role": "user", "content": "x"}], [])
+
+    infos = [r for r in caplog.records if r.levelname == "INFO"]
+    assert len(infos) == 1
+    assert "content_filter" in infos[0].getMessage()
