@@ -149,9 +149,21 @@ import json
 with open('${REVIEW_DIR}/review/risk_matrix.json') as f:
     print(json.load(f).get('risk_score', 'NA'))
 ")
+# Patch 0069: surface assessment_status so the gate output distinguishes
+# clean Review runs from upstream-degraded or reconciliation-failed runs.
+# `validation: PASS` still means only "files exist and schemas conform"
+# (its narrow but real meaning); the assessment_status line is the
+# multi-dimensional health signal, companion to validate_review.sh's
+# file-conformance check.
+assessment_status=$(python3 -c "
+import json
+with open('${REVIEW_DIR}/review/risk_matrix.json') as f:
+    print(json.load(f).get('assessment_status', 'unknown'))
+")
 
 {
     echo "validation: PASS"
+    echo "assessment_status: ${assessment_status}"
     echo "verdict: ${verdict}"
     echo "risk_score: ${risk_score}"
     echo "review_dir: ${REVIEW_DIR}"
