@@ -250,13 +250,61 @@ def _read_source_line(assets_dir: Path, file_ref: str, line_no: int) -> str | No
     return None
 
 
-def _rehydrate_evidence(node: Any, assets_dir: Path) -> None:
+# Common extensions to try when an evidence file_ref doesn't resolve on disk
+# (patch 0068). Ordered by likelihood for the typical R-stats repos this
+# pipeline reviews — R first, then Python and notebook formats. The list is
+# intentionally short: speculative extension hunting is fine for "one-character
+# slip" repairs but bad for "totally different file" guessing.
+_EVIDENCE_REPAIR_EXTENSIONS = (".R", ".r", ".Rmd", ".rmd", ".qmd", ".py", ".ipynb")
+
+
+def _repair_evidence_file_ref(file_ref: str, assets_dir: Path) -> str | None:
+    """Try to repair a missing-extension evidence file_ref (patch 0068).
+
+    Motivated by the smoke-test pattern where the model occasionally drops the
+    trailing ``.R`` on a file path mid-evidence-list (a token-prediction slip,
+    same family as the 0066 doubled-key stutter — short, structurally specific,
+    not prompt-fixable). When the original path doesn't resolve but
+    ``<path><ext>`` does for exactly one of :data:`_EVIDENCE_REPAIR_EXTENSIONS`,
+    return the repaired form. Otherwise return ``None``.
+
+    Strict "exactly one match" rule: refuse to guess between competing
+    candidates (e.g. if both ``foo.R`` and ``foo.py`` exist) — that's no longer
+    a one-character slip, it's a different file entirely.
+
+    Path-traversal-safe via the same base/target.resolve() check
+    :func:`_read_source_line` uses.
+    """
+    try:
+        base = assets_dir.resolve()
+        candidates: list[str] = []
+        for ext in _EVIDENCE_REPAIR_EXTENSIONS:
+            candidate_ref = file_ref + ext
+            target = (assets_dir / candidate_ref).resolve()
+            if base != target and base not in target.parents:
+                continue  # escaped the assets directory
+            if target.is_file():
+                candidates.append(candidate_ref)
+        if len(candidates) == 1:
+            return candidates[0]
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _rehydrate_evidence(node: Any, assets_dir: Path) -> int:
     """Attach a verbatim ``snippet`` to every {file, line} evidence object.
 
     Walks the audit recursively (the model decides the nesting) and, for any
     dict carrying a string ``file`` and an int ``line``, splices in the exact
     source line. Mutates in place; never raises.
+
+    Returns the number of file_ref repairs applied (patch 0068): when the
+    initial path doesn't resolve but a common-extension variant does,
+    ``node["file"]`` is updated in place and the count increments. Callers
+    can surface the total in audit notes when > 0.
     """
+    repairs = 0
     if isinstance(node, dict):
         file_ref = node.get("file")
         line_no = node.get("line")
@@ -264,13 +312,21 @@ def _rehydrate_evidence(node: Any, assets_dir: Path) -> None:
             line_no = int(line_no)
         if isinstance(file_ref, str) and isinstance(line_no, int) and not isinstance(line_no, bool):
             snippet = _read_source_line(assets_dir, file_ref, line_no)
+            if snippet is None:
+                # Patch 0068: try extension-repair before giving up.
+                repaired_ref = _repair_evidence_file_ref(file_ref, assets_dir)
+                if repaired_ref is not None:
+                    node["file"] = repaired_ref
+                    snippet = _read_source_line(assets_dir, repaired_ref, line_no)
+                    repairs += 1
             if snippet is not None:
                 node["snippet"] = snippet
         for value in node.values():
-            _rehydrate_evidence(value, assets_dir)
+            repairs += _rehydrate_evidence(value, assets_dir)
     elif isinstance(node, list):
         for item in node:
-            _rehydrate_evidence(item, assets_dir)
+            repairs += _rehydrate_evidence(item, assets_dir)
+    return repairs
 
 
 def _normalise(obj: dict[str, Any], review_title: str) -> dict[str, Any]:
@@ -547,7 +603,18 @@ def run_cqv(
             "via deterministic pre-pass; not a content failure]"
         )
         output["notes"] = f"{marker}\n{output.get('notes', '')}".strip()
-    _rehydrate_evidence(output, assets_dir)
+    path_repairs = _rehydrate_evidence(output, assets_dir)
+    if path_repairs > 0:
+        # Patch 0068: extension-repair telemetry. Audit trail records the count
+        # so a sudden uptick (model regressing on path emission) is visible to
+        # whoever's reading the run output. The repairs themselves are silent
+        # — the substituted paths look like any other valid evidence path —
+        # but the note lets a human verify the count is small / stable.
+        marker = (
+            f"[patch 0068: repaired {path_repairs} evidence file path(s) "
+            "by extension search (e.g. 'foo' -> 'foo.R')]"
+        )
+        output["notes"] = f"{marker}\n{output.get('notes', '')}".strip()
     _apply_stat_layer(
         output, review_dir, assets_dir, model=model, complete_fn=complete_fn
     )

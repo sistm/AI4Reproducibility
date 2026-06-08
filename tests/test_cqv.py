@@ -355,3 +355,174 @@ def test_run_cqv_clean_output_emits_no_stutter_marker(tmp_path):
     assert out["status"] == "success"
     assert out.get("failure_mode") is None
     assert "patch 0066" not in out.get("notes", "")
+
+
+# --- patch 0068: evidence path extension-repair -----------------------------
+
+
+def test_repair_evidence_file_ref_adds_missing_R_extension(tmp_path):
+    """The smoke-test pattern: the model drops `.R` on one entry in an
+    evidence array. If exactly one extension produces a real file, repair."""
+    from tools.orchestrator.cqv import _repair_evidence_file_ref
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "DoFiguresTables.R").write_text("x <- 1\n")
+
+    out = _repair_evidence_file_ref("code/DoFiguresTables", tmp_path)
+    assert out == "code/DoFiguresTables.R"
+
+
+def test_repair_evidence_file_ref_returns_none_when_already_resolves(tmp_path):
+    """Paths that resolve as-is don't need repair; helper short-circuits to
+    None so the caller leaves the entry alone."""
+    from tools.orchestrator.cqv import _repair_evidence_file_ref
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "main.R").write_text("x <- 1\n")
+
+    # Helper only tries extension additions; the existing path's resolution
+    # is the caller's job. Helper just looks for a uniquely-resolving variant.
+    out = _repair_evidence_file_ref("code/main", tmp_path)
+    assert out == "code/main.R"  # main + .R resolves; helper returns it
+
+
+def test_repair_evidence_file_ref_refuses_ambiguous_match(tmp_path):
+    """When multiple extensions would resolve, refuse to guess. The smoke
+    pattern is single-character slips; multiple matches is no longer that —
+    it's a different file entirely. Strict 'exactly one' rule."""
+    from tools.orchestrator.cqv import _repair_evidence_file_ref
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "analysis.R").write_text("x <- 1\n")
+    (code / "analysis.py").write_text("x = 1\n")
+
+    out = _repair_evidence_file_ref("code/analysis", tmp_path)
+    assert out is None
+
+
+def test_repair_evidence_file_ref_returns_none_for_no_match(tmp_path):
+    """If no extension produces a real file, return None — don't fabricate."""
+    from tools.orchestrator.cqv import _repair_evidence_file_ref
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "main.R").write_text("x <- 1\n")
+
+    out = _repair_evidence_file_ref("code/elsewhere", tmp_path)
+    assert out is None
+
+
+def test_repair_evidence_file_ref_rejects_path_traversal(tmp_path):
+    """Path-traversal safety: a repair attempt that resolves outside
+    assets_dir must be rejected, same as :func:`_read_source_line`."""
+    from tools.orchestrator.cqv import _repair_evidence_file_ref
+
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.R").write_text("x <- 1\n")
+
+    # ../outside/secret would resolve to a real file outside assets_dir.
+    out = _repair_evidence_file_ref("../outside/secret", assets)
+    assert out is None
+
+
+def test_rehydrate_evidence_mutates_path_and_returns_repair_count(tmp_path):
+    """End-to-end through _rehydrate_evidence: a bad path gets repaired
+    in place, the snippet attaches to the repaired path, and the count
+    reflects the number of repairs."""
+    from tools.orchestrator.cqv import _rehydrate_evidence
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "DoFiguresTables.R").write_text("# line 1\n" * 300)
+    (code / "main.R").write_text("# main 1\n" * 200)
+
+    node = {
+        "evidence": [
+            {"file": "code/main.R", "line": 1},  # already resolves
+            {"file": "code/DoFiguresTables", "line": 278},  # smoke's slip
+            {"file": "code/main", "line": 1},  # also needs .R repair
+        ],
+    }
+    repairs = _rehydrate_evidence(node, tmp_path)
+
+    assert repairs == 2
+    # Repaired in place.
+    assert node["evidence"][1]["file"] == "code/DoFiguresTables.R"
+    assert node["evidence"][2]["file"] == "code/main.R"
+    # Snippets attached for all entries.
+    for entry in node["evidence"]:
+        assert "snippet" in entry
+
+
+def test_rehydrate_evidence_leaves_unrepairable_paths_alone(tmp_path):
+    """When repair can't resolve the path, the entry stays as the model
+    emitted it. No snippet, no mutation, no crash."""
+    from tools.orchestrator.cqv import _rehydrate_evidence
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "main.R").write_text("x <- 1\n")
+
+    node = {"file": "code/nonexistent", "line": 5}
+    repairs = _rehydrate_evidence(node, tmp_path)
+
+    assert repairs == 0
+    assert node["file"] == "code/nonexistent"  # unchanged
+    assert "snippet" not in node
+
+
+def test_run_cqv_surfaces_repair_count_in_notes(tmp_path):
+    """End-to-end: when the model emits an evidence entry with a missing-
+    extension path AND the repair resolves, the CQV output's notes record
+    the count via the patch-0068 marker."""
+    _seed_assets(tmp_path, "with-repair")
+    # Need an actual code file under assets so the repair can resolve.
+    code_dir = tmp_path / "ai4r" / "with-repair" / "input" / "assets" / "code"
+    code_dir.mkdir(parents=True, exist_ok=True)
+    (code_dir / "main.R").write_text("x <- 1\n" * 50)
+
+    audit = json.dumps({
+        "status": "success",
+        "reproducibility_blockers": [{
+            "id": "x",
+            "severity": "HIGH",
+            "description": "missing seed",
+            "evidence": [{"file": "code/main", "line": 5}],  # missing .R
+        }],
+    })
+
+    out = run_cqv("with-repair", root=tmp_path, complete_fn=_fake_returning(audit))
+
+    # The file path was mutated to the repaired form.
+    blocker = next(b for b in out["reproducibility_blockers"] if b.get("id") == "x")
+    assert blocker["evidence"][0]["file"] == "code/main.R"
+    # Notes mention the repair.
+    assert "patch 0068" in out["notes"]
+    assert "1 evidence file path" in out["notes"]
+
+
+def test_run_cqv_clean_output_has_no_repair_marker(tmp_path):
+    """No bad paths => no patch-0068 marker in notes."""
+    _seed_assets(tmp_path, "no-repair-needed")
+    code_dir = tmp_path / "ai4r" / "no-repair-needed" / "input" / "assets" / "code"
+    code_dir.mkdir(parents=True, exist_ok=True)
+    (code_dir / "main.R").write_text("x <- 1\n")
+
+    audit = json.dumps({
+        "status": "success",
+        "reproducibility_blockers": [{
+            "id": "x",
+            "severity": "HIGH",
+            "description": "missing seed",
+            "evidence": [{"file": "code/main.R", "line": 1}],  # already resolves
+        }],
+    })
+
+    out = run_cqv("no-repair-needed", root=tmp_path, complete_fn=_fake_returning(audit))
+    assert "patch 0068" not in out.get("notes", "")
