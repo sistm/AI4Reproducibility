@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tools.orchestrator.cqv import run_cqv
 from tools.orchestrator.llm import LLMResponse
 
@@ -75,12 +77,13 @@ def test_paper_id_is_forced(tmp_path):
 
 
 def test_model_signalled_partial_gets_a_blocker(tmp_path):
+    # Rule 5: _normalise injects BLOCKER-0 for partial + no blockers.
+    # Patch 0072 then upgrades partial→success and clears the synthetic blocker.
     _seed_assets(tmp_path, "partialish")
-    # model reports partial but forgets to add a blocker -> rule 5 injects one
     model_json = json.dumps({"status": "partial", "reproducibility_blockers": []})
     out = run_cqv("partialish", root=tmp_path, complete_fn=_fake_returning(model_json))
-    assert out["status"] == "partial"
-    assert len(out["reproducibility_blockers"]) >= 1
+    assert out["status"] == "success"           # upgraded by 0072
+    assert out["reproducibility_blockers"] == []  # synthetic BLOCKER-0 cleared
 
 
 def test_defaults_filled(tmp_path):
@@ -318,6 +321,7 @@ def test_run_cqv_records_stutter_count_alongside_repair_when_both_happen(tmp_pat
     distinguishes 'model stuttered + got truncated' from 'model emitted
     structurally broken JSON unrelated to known artifacts'. This is the
     smoke-C scenario (one stutter + a bracket mismatch from truncation)."""
+    pytest.importorskip("json_repair")
     _seed_assets(tmp_path, "stutter-plus-truncation")
     # Stutter inside a still-malformed payload: json_repair has to step in.
     # The trailing comma + missing closing brace forces the deterministic
@@ -526,3 +530,85 @@ def test_run_cqv_clean_output_has_no_repair_marker(tmp_path):
 
     out = run_cqv("no-repair-needed", root=tmp_path, complete_fn=_fake_returning(audit))
     assert "patch 0068" not in out.get("notes", "")
+
+# ---------------------------------------------------------------------------
+# Orchestrator-driven check coverage (patch 0070)
+# ---------------------------------------------------------------------------
+
+def test_partial_data_checks_set_by_orchestrator(tmp_path):
+    """Orchestrator overwrites model-fabricated check lists with real coverage."""
+    from tools.cqv_agent.static_checks import REGISTRY
+    from tools.cqv_agent.static_checks.dispatch import list_static_checks
+
+    _seed_assets(tmp_path, "checked")
+    model_json = json.dumps({
+        "partial_data": {
+            "checks_completed": ["FAKE-CHECK-1", "FAKE-CHECK-2"],
+            "checks_skipped": ["FAKE-SKIPPED"],
+        },
+        "notes": "test",
+    })
+    out = run_cqv("checked", root=tmp_path, complete_fn=_fake_returning(model_json))
+
+    pd = out["partial_data"]
+    assert pd is not None, "partial_data must be set by orchestrator"
+    completed = pd["checks_completed"]
+    skipped = pd["checks_skipped"]
+
+    assert "FAKE-CHECK-1" not in completed, "fabricated IDs must not appear in completed"
+    assert "FAKE-SKIPPED" not in skipped, "fabricated IDs must not appear in skipped"
+
+    all_check_ids = set(REGISTRY.keys())
+    covered = set(completed) | set(skipped)
+    assert all_check_ids == covered, (
+        f"completed+skipped must cover all registry entries; "
+        f"missing={sorted(all_check_ids - covered)}"
+    )
+
+    check_info = list_static_checks()
+    stub_ids = {cid for cid, meta in check_info.items() if not meta["implemented"]}
+    for stub_id in stub_ids:
+        assert stub_id in skipped, (
+            f"Stub {stub_id} must be in checks_skipped, not completed"
+        )
+
+
+def test_partial_data_checks_on_r_assets_excludes_python_only(tmp_path):
+    """Python-only checks are skipped when assets contain only R files."""
+    from tools.cqv_agent.static_checks.dispatch import APPLICABLE_TO
+
+    _seed_assets(tmp_path, "r-only")
+    out = run_cqv("r-only", root=tmp_path, complete_fn=_fake_returning("{}"))
+
+    pd = out["partial_data"]
+    assert pd is not None
+    skipped = pd["checks_skipped"]
+
+    python_only = [c for c, langs in APPLICABLE_TO.items() if langs == ["python"]]
+    for check_id in python_only:
+        assert check_id in skipped, (
+            f"Python-only check {check_id} should be in checks_skipped for R-only assets"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Status threshold (patch 0072)
+# ---------------------------------------------------------------------------
+
+def test_partial_with_stubs_only_upgraded_to_success(tmp_path):
+    """Model-emitted partial with no failure_mode is upgraded to success."""
+    _seed_assets(tmp_path, "upgrade-me")
+    model_json = json.dumps({"status": "partial", "notes": "some checks skipped"})
+    out = run_cqv("upgrade-me", root=tmp_path, complete_fn=_fake_returning(model_json))
+    assert out["status"] == "success", (
+        f"Expected partial→success upgrade; got {out['status']}"
+    )
+    assert "upgraded" in out.get("notes", "")
+
+
+def test_partial_with_failure_mode_not_upgraded(tmp_path):
+    """Parse failure sets failure_mode; partial must not be upgraded."""
+    _seed_assets(tmp_path, "parse-fail")
+    out = run_cqv("parse-fail", root=tmp_path, complete_fn=_fake_returning("not json"))
+    assert out["status"] == "partial"
+    assert out.get("failure_mode") == "output_parse_failed"
