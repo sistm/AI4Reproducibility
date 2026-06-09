@@ -636,6 +636,11 @@ def _synthesis_audit_prompt(
         '  - Use "refuted" when the draft already addresses it; the reason '
         "must say where (issue ID, file path, or specific draft text).\n"
         '  - Use "deferred" when the concern is valid but out of scope.\n'
+        "  - For each \"incorporated\" entry that relates to specific issues in "
+        "the rm, add the optional field "
+        '"addresses_issue_ids": ["B1", ...]  listing the issue IDs from '
+        "rm.issues you plan to modify. Omit this field for concerns about "
+        "verdict text, markdown style, or other non-issue content.\n"
         "  - No prose, no markdown fences. Do NOT include rm or markdown "
         "revisions here — those go in the next call."
     )
@@ -740,7 +745,16 @@ def _normalise_addressed(raw: Any, required_ids: set[str]) -> list[dict[str, Any
             if cid in seen_ids:
                 continue
             seen_ids.add(cid)
-            out.append({"id": cid, "resolution": resolution, "reason": reason})
+            record: dict[str, Any] = {"id": cid, "resolution": resolution, "reason": reason}
+            # Per-concern mapping (patch 0056): pass through if valid.
+            addr_ids = entry.get("addresses_issue_ids")
+            if (
+                isinstance(addr_ids, list)
+                and addr_ids
+                and all(isinstance(x, str) for x in addr_ids)
+            ):
+                record["addresses_issue_ids"] = addr_ids
+            out.append(record)
     # Auto-add any required concern the Synthesiser omitted.
     for cid in required_ids - seen_ids:
         out.append({

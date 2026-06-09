@@ -164,16 +164,32 @@ def _check_verdict_consistency(
     return rm, md_files
 
 
+def _get_issue_by_id(rm: dict[str, Any], issue_id: str) -> dict[str, Any] | None:
+    """Return the first issue matching ``issue_id`` across all severity buckets."""
+    for severity in ("critical", "major", "minor", "suggestions"):
+        for issue in (rm.get("issues") or {}).get(severity, []) or []:
+            if isinstance(issue, dict) and issue.get("id") == issue_id:
+                return issue
+    return None
+
+
 def _check_incorporated_claims(
-    rm: dict[str, Any], diff_exists: bool
+    rm: dict[str, Any],
+    diff_exists: bool,
+    *,
+    draft_rm: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Invariant 2: ``incorporated`` must correspond to an actual diff.
 
-    Aggregate check — if ANY diff exists between draft and final, all
-    ``incorporated`` entries pass. If zero diffs exist AND there's at least
-    one ``incorporated``, downgrade every ``incorporated`` to ``deferred``
-    with a reason flagging the inconsistency. Per-concern mapping (which
-    diff resolved which concern) is deferred to a future patch.
+    Per-concern path (patch 0056): when an ``incorporated`` entry carries
+    ``addresses_issue_ids`` and ``draft_rm`` is provided, verify that at least
+    one of the listed issue IDs actually changed between draft and final rm.
+    If none changed, downgrade that specific concern to ``deferred``.
+
+    Aggregate fallback: entries without ``addresses_issue_ids`` (or when
+    ``draft_rm`` is absent) fall back to the v1 aggregate check — if ANY diff
+    exists, the claim is accepted; if zero diff and at least one ``incorporated``
+    claim exists, all are downgraded.
     """
     addressed = rm.get("addressed_concerns")
     if not isinstance(addressed, list) or not addressed:
@@ -183,27 +199,62 @@ def _check_incorporated_claims(
         if isinstance(a, dict) and a.get("resolution") == "incorporated"
     ]
     if not incorporated_ids:
-        return rm  # nothing to verify
-    if diff_exists:
-        return rm  # at least one Synthesiser change happened; claims plausible
-    new_addressed = []
-    for a in addressed:
-        if isinstance(a, dict) and a.get("resolution") == "incorporated":
-            new_addressed.append({
-                **a,
-                "resolution": "deferred",
-                "reason": "incorporation claimed but Synthesiser produced no "
-                          "diff against the draft (reconciliation downgrade)",
-            })
+        return rm
+
+    new_addressed: list[Any] = []
+    downgraded: list[str] = []
+
+    for entry in addressed:
+        if not isinstance(entry, dict) or entry.get("resolution") != "incorporated":
+            new_addressed.append(entry)
+            continue
+
+        addr_ids = entry.get("addresses_issue_ids")
+        has_per_concern = (
+            isinstance(addr_ids, list)
+            and bool(addr_ids)
+            and all(isinstance(x, str) for x in addr_ids)
+            and draft_rm is not None
+        )
+
+        if has_per_concern:
+            changed = any(
+                _get_issue_by_id(draft_rm, iid) != _get_issue_by_id(rm, iid)
+                for iid in addr_ids
+            )
+            if changed:
+                new_addressed.append(entry)
+            else:
+                downgraded.append(entry.get("id", "?"))
+                new_addressed.append({
+                    **entry,
+                    "resolution": "deferred",
+                    "reason": (
+                        f"incorporation claimed for issue(s) {addr_ids} "
+                        "but those issues are unchanged "
+                        "(reconciliation per-concern check)"
+                    ),
+                })
         else:
-            new_addressed.append(a)
+            if diff_exists:
+                new_addressed.append(entry)
+            else:
+                downgraded.append(entry.get("id", "?"))
+                new_addressed.append({
+                    **entry,
+                    "resolution": "deferred",
+                    "reason": "incorporation claimed but Synthesiser produced no "
+                              "diff against the draft (reconciliation downgrade)",
+                })
+
+    if not downgraded:
+        return rm
     rm = dict(rm)
     rm["addressed_concerns"] = new_addressed
     _append_note(
         rm,
-        f"[reconciliation: {len(incorporated_ids)} 'incorporated' claim(s) "
-        f"downgraded to 'deferred' (no diff against draft): "
-        f"{', '.join(incorporated_ids)}]",
+        f"[reconciliation: {len(downgraded)} 'incorporated' claim(s) "
+        f"downgraded to 'deferred': {', '.join(downgraded)}]",
     )
     return rm
 
@@ -276,7 +327,7 @@ def reconcile_review(
     # Invariant 2 detection runs first so its diff check sees the unmodified
     # Synthesiser output. Mutation happens after.
     diff_exists = _draft_differs_from_final(draft_snapshot, rm, md_files)
-    rm = _check_incorporated_claims(rm, diff_exists)
+    rm = _check_incorporated_claims(rm, diff_exists, draft_rm=draft_snapshot.get("rm", {}))
     rm, md_files = _check_verdict_consistency(rm, md_files)
     rm = _check_address_references(rm)
     return rm, md_files

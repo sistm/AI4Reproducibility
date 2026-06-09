@@ -360,3 +360,83 @@ def test_snapshot_is_deep_copy():
     assert snap["rm"]["issues"]["critical"] == [{"id": "C1"}]
     assert snap["rm"]["verdict"] == "MINOR REVISION"
     assert snap["md_files"]["final_review.md"] == "draft text"
+
+
+# ---- _check_incorporated_claims per-concern path (patch 0056) ---------------
+
+def _make_rm_with_issue(issue_id: str, issue_text: str = "original") -> dict:
+    return {
+        "issues": {"critical": [{"id": issue_id, "description": issue_text}]},
+        "addressed_concerns": [],
+    }
+
+
+def test_per_concern_pass_when_claimed_issue_changed():
+    """Per-concern: issue listed in addresses_issue_ids actually changed → keep incorporated."""
+    draft_rm = _make_rm_with_issue("B1", "original text")
+    final_rm = _make_rm_with_issue("B1", "revised text")
+    final_rm["addressed_concerns"] = [
+        {"id": "K1", "resolution": "incorporated", "reason": "fixed B1",
+         "addresses_issue_ids": ["B1"]},
+    ]
+    out = _check_incorporated_claims(final_rm, diff_exists=True, draft_rm=draft_rm)
+    assert out["addressed_concerns"][0]["resolution"] == "incorporated"
+
+
+def test_per_concern_fail_when_claimed_issue_unchanged():
+    """Per-concern: claimed issue IDs are identical in draft and final → downgrade."""
+    draft_rm = _make_rm_with_issue("B1", "unchanged")
+    final_rm = _make_rm_with_issue("B1", "unchanged")
+    final_rm["addressed_concerns"] = [
+        {"id": "K1", "resolution": "incorporated", "reason": "claimed to fix B1",
+         "addresses_issue_ids": ["B1"]},
+    ]
+    out = _check_incorporated_claims(final_rm, diff_exists=True, draft_rm=draft_rm)
+    entry = out["addressed_concerns"][0]
+    assert entry["resolution"] == "deferred"
+    assert "B1" in entry["reason"]
+    assert "per-concern" in entry["reason"]
+
+
+def test_per_concern_selective_downgrade():
+    """Per-concern: K1 issue changed (passes), K2 issue unchanged (downgraded)."""
+    draft_rm = {
+        "issues": {
+            "critical": [
+                {"id": "B1", "description": "original"},
+                {"id": "B2", "description": "unchanged"},
+            ]
+        },
+        "addressed_concerns": [],
+    }
+    final_rm = {
+        "issues": {
+            "critical": [
+                {"id": "B1", "description": "revised"},   # changed
+                {"id": "B2", "description": "unchanged"},  # NOT changed
+            ]
+        },
+        "addressed_concerns": [
+            {"id": "K1", "resolution": "incorporated", "reason": "fixed B1",
+             "addresses_issue_ids": ["B1"]},
+            {"id": "K2", "resolution": "incorporated", "reason": "claimed to fix B2",
+             "addresses_issue_ids": ["B2"]},
+        ],
+    }
+    out = _check_incorporated_claims(final_rm, diff_exists=True, draft_rm=draft_rm)
+    by_id = {a["id"]: a for a in out["addressed_concerns"]}
+    assert by_id["K1"]["resolution"] == "incorporated"
+    assert by_id["K2"]["resolution"] == "deferred"
+    assert "K2" in out.get("notes", "")
+
+
+def test_per_concern_no_addresses_ids_falls_back_to_aggregate():
+    """No addresses_issue_ids → aggregate diff check used regardless of draft_rm."""
+    draft_rm = _make_rm_with_issue("B1", "unchanged")
+    final_rm = _make_rm_with_issue("B1", "unchanged")
+    final_rm["addressed_concerns"] = [
+        {"id": "K1", "resolution": "incorporated", "reason": "changed the markdown"},
+    ]
+    # diff_exists=True (some md change), no addresses_issue_ids → aggregate accepts
+    out = _check_incorporated_claims(final_rm, diff_exists=True, draft_rm=draft_rm)
+    assert out["addressed_concerns"][0]["resolution"] == "incorporated"
