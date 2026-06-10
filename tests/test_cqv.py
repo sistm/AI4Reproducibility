@@ -407,6 +407,28 @@ def test_repair_evidence_file_ref_refuses_ambiguous_match(tmp_path):
     assert out is None
 
 
+def test_repair_evidence_file_ref_handles_case_insensitive_fs(tmp_path):
+    """On macOS APFS (default case-insensitive) and Windows NTFS, .R and .r
+    extensions resolve to the same file. The 'exactly one match' rule must
+    deduplicate by resolved target, not by extension string, so a single
+    foo.R file is not double-counted as both foo.R and foo.r.
+
+    Regression test for the bug where macOS users saw all four
+    extension-repair tests fail because both .R and .r appeared to resolve."""
+    from tools.orchestrator.cqv import _repair_evidence_file_ref
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "analysis.R").write_text("x <- 1\n")
+
+    # On a case-insensitive FS, both .R and .r would naively appear to match.
+    # The function must deduplicate by resolved path. On case-sensitive FS,
+    # only .R matches and there is nothing to deduplicate — the result is
+    # the same either way.
+    out = _repair_evidence_file_ref("code/analysis", tmp_path)
+    assert out == "code/analysis.R"
+
+
 def test_repair_evidence_file_ref_returns_none_for_no_match(tmp_path):
     """If no extension produces a real file, return None — don't fabricate."""
     from tools.orchestrator.cqv import _repair_evidence_file_ref

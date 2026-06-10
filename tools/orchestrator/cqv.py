@@ -418,16 +418,20 @@ def _repair_evidence_file_ref(file_ref: str, assets_dir: Path) -> str | None:
     """
     try:
         base = assets_dir.resolve()
-        candidates: list[str] = []
+        # Track candidates by their resolved target so case-insensitive
+        # filesystems (macOS APFS by default, Windows NTFS) don't double-count
+        # .R / .r and .Rmd / .rmd as separate matches. Key: resolved Path;
+        # value: the first extension-form string we saw resolving to it.
+        seen_targets: dict[Path, str] = {}
         for ext in _EVIDENCE_REPAIR_EXTENSIONS:
             candidate_ref = file_ref + ext
             target = (assets_dir / candidate_ref).resolve()
             if base != target and base not in target.parents:
                 continue  # escaped the assets directory
-            if target.is_file():
-                candidates.append(candidate_ref)
-        if len(candidates) == 1:
-            return candidates[0]
+            if target.is_file() and target not in seen_targets:
+                seen_targets[target] = candidate_ref
+        if len(seen_targets) == 1:
+            return next(iter(seen_targets.values()))
     except (OSError, ValueError):
         return None
     return None
