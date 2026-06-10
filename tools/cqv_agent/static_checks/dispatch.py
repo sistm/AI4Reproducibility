@@ -131,12 +131,78 @@ def run_static_check(tool_id: str, repo_path: str | Path, **kwargs: Any) -> dict
 
 
 def list_static_checks() -> dict[str, dict]:
-    """Introspection: per-check (status, implementation module)."""
+    """Introspection: per-check (status, implementation module, applicable_to)."""
     out: dict[str, dict] = {}
     for tool_id, fn in REGISTRY.items():
         module = fn.__module__.rsplit(".", 1)[-1]
         out[tool_id] = {
             "implemented": module != "_stubs",
             "module": module,
+            "applicable_to": APPLICABLE_TO.get(tool_id, ["*"]),
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# Language applicability (patch 0070)
+# ---------------------------------------------------------------------------
+# Each entry lists the languages a check is meaningful for:
+#   ["*"]              — always applicable (file-/directory-level checks)
+#   ["r"]              — R-only patterns
+#   ["python"]         — Python-only patterns
+#   ["r", "python"]    — checks that inspect both R and Python source
+
+APPLICABLE_TO: dict[str, list[str]] = {
+    # Universal (file-/directory-level)
+    "check_readme_present":              ["*"],
+    "check_environment_tooling":         ["*"],
+    "check_main_entry_point":            ["*"],
+    "check_test_directory_present":      ["*"],
+    "check_file_naming_hygiene":         ["*"],
+    "check_archive_layout":              ["*"],
+    "check_output_naming_convention":    ["*"],
+    # R + Python source-level
+    "check_absolute_paths":              ["r", "python"],
+    "check_path_helpers":                ["r", "python"],
+    "check_version_pinning":             ["r", "python"],
+    "check_no_auto_install":             ["r", "python"],
+    "check_no_eval_parse":               ["r", "python"],
+    "check_no_system_calls":             ["r", "python"],
+    "check_no_hardcoded_secrets":        ["r", "python"],
+    "check_no_arbitrary_downloads":      ["r", "python"],
+    "check_no_unsafe_deserialization":   ["r", "python"],
+    "check_parse_success":               ["r", "python"],
+    "check_undefined_references":        ["r", "python"],
+    "check_function_signatures":         ["r", "python"],
+    "check_duplicate_code_blocks":       ["r", "python"],
+    "check_dead_code":                   ["r", "python"],
+    "check_loop_invariants":             ["r", "python"],
+    "check_error_handling_coverage":     ["r", "python"],
+    # R-only
+    "check_sessioninfo_block":           ["r"],
+    "check_no_workspace_clear":          ["r"],
+    "check_no_attach":                   ["r"],
+    "check_set_seed_scope":              ["r"],
+    "check_imports_complete":            ["r"],
+    "check_function_docs_present":       ["r"],
+    "check_no_unbounded_loops":          ["r"],
+    "check_global_state_mutation":       ["r"],
+    "check_growing_vectors":             ["r"],
+    # Python-only
+    "check_python_requirements":         ["python"],
+}
+
+
+def get_applicable_checks(detected_languages: set[str]) -> list[str]:
+    """Return check IDs applicable for the given set of detected languages.
+
+    Universal checks (``["*"]``) are always included.  Language-specific
+    checks are included only when the matching language appears in
+    ``detected_languages``.
+    """
+    applicable: list[str] = []
+    for check_id in REGISTRY:
+        langs = APPLICABLE_TO.get(check_id, ["*"])
+        if langs == ["*"] or any(lang in detected_languages for lang in langs):
+            applicable.append(check_id)
+    return applicable
