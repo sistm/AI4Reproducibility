@@ -391,6 +391,33 @@ def run_kbe(
         extracted[field] = parsed.get(field)
 
     output = _assemble(review_title, extracted, failed, transport_seen)
+
+    # Reference extraction: best-effort — never blocks the stage on failure.
+    # Only runs when the PDF is readable and targets were identified.
+    # The kbe/references/ directory and manifest.json are written here so ER
+    # can consume them without needing the PDF.
+    targets = output.get("reproduction_targets") or []
+    if targets and pdf_path.is_file():
+        try:
+            from tools.orchestrator.kbe_extract import extract_references
+            refs_dir = review_dir / "kbe" / "references"
+            manifest = extract_references(pdf_path, targets, refs_dir)
+            # Inject the primary reference_path into each target so the
+            # full contract is in kbe_output.json without reading manifest.json.
+            for target in targets:
+                tid = target.get("id", "")
+                entry = manifest.get(tid, {})
+                target["reference_path"] = entry.get("path")
+            output["references_manifest"] = str(
+                (refs_dir / "manifest.json").relative_to(review_dir / "kbe")
+            )
+        except Exception as exc:
+            output.setdefault("notes", "")
+            note = f"[kbe: reference extraction failed: {exc}]"
+            output["notes"] = (
+                f"{output['notes']}\n{note}".strip() if output["notes"] else note
+            )
+
     _write_outputs(review_dir, output)
     return output
 

@@ -84,6 +84,7 @@ def test_all_sections_succeed(tmp_path):
                 "what_it_shows": "classifier performance",
                 "source_page": 4,
                 "priority": "primary",
+                "reference_path": None,  # no real PDF in this test
             }]
         else:
             assert out[f] == [f"{f}-item"]
