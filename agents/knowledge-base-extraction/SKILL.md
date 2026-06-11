@@ -176,6 +176,28 @@ Structured outputs following the workflow specification:
 
 **Output Location:** `/ai4r/{review_title}/kbe/`
 
+### `reproduction_targets`
+
+KBE is the only stage that reads the manuscript, so it is responsible for
+identifying *what* a reviewer must reproduce. The `reproduction_targets`
+array names the specific figures, tables, and headline numerical results that
+carry the paper's claims. Each entry is an object:
+
+| field | meaning |
+|---|---|
+| `id` | short slug, e.g. `figure-3` |
+| `kind` | `figure` \| `table` \| `numerical_result` |
+| `label` | as printed, e.g. `Figure 3`, `Table 2` |
+| `caption` | the caption or a one-line description |
+| `what_it_shows` | one sentence on the quantity/claim reported |
+| `source_page` | page number if identifiable, else `null` |
+| `priority` | `primary` (main claims) \| `secondary` |
+
+The ER stage reads this array to know which produced outputs to compare against
+the manuscript references. Items the model returns malformed (missing label and
+description, unknown `kind`) are dropped or clamped during assembly, so ER can
+consume the field without re-validating.
+
 ---
 
 ## Workflow
@@ -249,6 +271,7 @@ When `status != "success"`, `kbe_output.json` MUST conform to this shape:
   "statistical_methods": [],
   "data_generation_processes": [],
   "reproducibility_gaps": [],
+  "reproduction_targets": [],
   "partial_data": null,
   "notes": "See notes.md for context."
 }

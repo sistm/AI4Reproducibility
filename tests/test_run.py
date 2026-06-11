@@ -24,6 +24,7 @@ _KBE_FIELDS = (
     "statistical_methods",
     "data_generation_processes",
     "reproducibility_gaps",
+    "reproduction_targets",
 )
 
 needs_bash = pytest.mark.skipif(

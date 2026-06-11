@@ -10,7 +10,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.orchestrator.kbe import _ARRAY_FIELDS, run_kbe
+from tools.orchestrator.kbe import (
+    _ARRAY_FIELDS,
+    _normalise_reproduction_targets,
+    run_kbe,
+)
 from tools.orchestrator.llm import LLMResponse
 
 VALIDATOR_REQUIRED_KEYS = {"paper_id", "status"}
@@ -43,7 +47,18 @@ def _section_backend(per_field: dict[str, str]):
 def _all_valid() -> dict[str, str]:
     per = {"paper_title": json.dumps({"paper_title": "A Study of Things"})}
     for f in _ARRAY_FIELDS:
-        per[f] = json.dumps({f: [f"{f}-item"]})
+        if f == "reproduction_targets":
+            per[f] = json.dumps({f: [{
+                "id": "figure-1",
+                "kind": "figure",
+                "label": "Figure 1",
+                "caption": "ROC curves",
+                "what_it_shows": "classifier performance",
+                "source_page": 4,
+                "priority": "primary",
+            }]})
+        else:
+            per[f] = json.dumps({f: [f"{f}-item"]})
     return per
 
 
@@ -60,7 +75,18 @@ def test_all_sections_succeed(tmp_path):
     assert out["paper_title"] == "A Study of Things"
     assert out["partial_data"] is None
     for f in _ARRAY_FIELDS:
-        assert out[f] == [f"{f}-item"]
+        if f == "reproduction_targets":
+            assert out[f] == [{
+                "id": "figure-1",
+                "kind": "figure",
+                "label": "Figure 1",
+                "caption": "ROC curves",
+                "what_it_shows": "classifier performance",
+                "source_page": 4,
+                "priority": "primary",
+            }]
+        else:
+            assert out[f] == [f"{f}-item"]
     assert VALIDATOR_REQUIRED_KEYS <= set(_read_output(tmp_path, "my-paper"))
 
 
@@ -276,3 +302,73 @@ def test_section_prompt_states_the_item_cap():
 
     assert f"at most {_MAX_ITEMS}" in _section_prompt("statistical_methods", "m", "PAPER")
     assert "at most" not in _section_prompt("paper_title", "t", "PAPER")
+
+
+# ---------------------------------------------------------------------------
+# reproduction_targets (patch A) — KBE identifies figures/tables to reproduce
+# ---------------------------------------------------------------------------
+
+def test_reproduction_targets_field_present_on_success(tmp_path):
+    out = _run(tmp_path, "rt-paper", _all_valid())
+    assert "reproduction_targets" in out
+    assert out["reproduction_targets"][0]["id"] == "figure-1"
+    assert out["reproduction_targets"][0]["kind"] == "figure"
+
+
+def test_reproduction_targets_present_in_failure_output(tmp_path):
+    # A hard failure (pdf missing) still carries the key for contract stability.
+    out = run_kbe("no-pdf", root=tmp_path, complete_fn=_section_backend({}),
+                  extract_fn=lambda p: (_ for _ in ()).throw(RuntimeError("x")))
+    assert out["reproduction_targets"] == []
+
+
+def test_normalise_drops_non_dict_items():
+    out = _normalise_reproduction_targets(["a string", 5, None, {"label": "Figure 1"}])
+    assert len(out) == 1
+    assert out[0]["label"] == "Figure 1"
+
+
+def test_normalise_drops_item_with_no_label_or_description():
+    out = _normalise_reproduction_targets([{"kind": "figure", "source_page": 3}])
+    assert out == []
+
+
+def test_normalise_clamps_bad_kind_and_priority():
+    out = _normalise_reproduction_targets([{
+        "label": "Table 2", "kind": "barchart", "priority": "urgent",
+    }])
+    assert out[0]["kind"] == "numerical_result"   # bad kind -> default
+    assert out[0]["priority"] == "secondary"       # bad priority -> default
+
+
+def test_normalise_defaults_missing_id():
+    out = _normalise_reproduction_targets([{"label": "Figure 9", "kind": "figure"}])
+    assert out[0]["id"] == "figure-1"  # kind-index fallback
+
+
+def test_normalise_rejects_bool_page():
+    out = _normalise_reproduction_targets([{"label": "F", "source_page": True}])
+    assert out[0]["source_page"] is None
+
+
+def test_normalise_keeps_valid_page():
+    out = _normalise_reproduction_targets([{"label": "F", "source_page": 7}])
+    assert out[0]["source_page"] == 7
+
+
+def test_reproduction_targets_capped(tmp_path):
+    many = [{"label": f"Figure {i}", "kind": "figure"} for i in range(20)]
+    per = _all_valid()
+    per["reproduction_targets"] = json.dumps({"reproduction_targets": many})
+    out = _run(tmp_path, "many-targets", per)
+    assert len(out["reproduction_targets"]) <= 12
+
+
+def test_reproduction_targets_prompt_requests_objects():
+    # The section prompt for this field must ask for an array of objects.
+    from tools.orchestrator.kbe import _SECTION_GUIDANCE, _section_prompt
+    prompt = _section_prompt(
+        "reproduction_targets", _SECTION_GUIDANCE["reproduction_targets"], "paper text"
+    )
+    assert "array of objects" in prompt
+    assert "figure" in prompt and "table" in prompt

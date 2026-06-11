@@ -53,6 +53,7 @@ _ARRAY_FIELDS = (
     "statistical_methods",
     "data_generation_processes",
     "reproducibility_gaps",
+    "reproduction_targets",
 )
 
 _SECTION_GUIDANCE: dict[str, str] = {
@@ -66,6 +67,15 @@ _SECTION_GUIDANCE: dict[str, str] = {
     "preprocessing steps",
     "reproducibility_gaps": "concrete reproducibility gaps (missing seeds, "
     "unspecified versions, undefined preprocessing, unavailable data)",
+    "reproduction_targets": "the specific figures, tables, and key numerical "
+    "results a reviewer would need to reproduce to verify the paper. Each item "
+    "is an object with fields: id (short slug, e.g. 'figure-3'), kind "
+    "(one of 'figure', 'table', 'numerical_result'), label (as printed, e.g. "
+    "'Figure 3' or 'Table 2'), caption (the caption or a one-line description), "
+    "what_it_shows (one sentence on the quantity/claim it reports), source_page "
+    "(integer page number if identifiable, else null), and priority "
+    "(one of 'primary', 'secondary' — primary items carry the paper's main "
+    "claims)",
 }
 
 
@@ -88,6 +98,15 @@ def _section_prompt(field: str, guidance: str, paper_text: str) -> str:
         shape = f'{{"{field}": "<string, or null if not found>"}}'
         kind = "a JSON string"
         limit = ""
+    elif field == "reproduction_targets":
+        shape = f'{{"{field}": [ {{ ... }}, ... ]}}'
+        kind = "a JSON array of objects (use [] if you find nothing)"
+        limit = (
+            f" Include at most {_MAX_ITEMS} items — prioritise the figures, "
+            "tables, and headline numbers that carry the paper's main claims. "
+            "Each item is an object with the fields described above; keep "
+            "caption and what_it_shows to one concise sentence each."
+        )
     else:
         shape = f'{{"{field}": [ ... ]}}'
         kind = "a JSON array (use [] if you find nothing)"
@@ -167,9 +186,60 @@ def _failure_output(
         "statistical_methods": [],
         "data_generation_processes": [],
         "reproducibility_gaps": [],
+        "reproduction_targets": [],
         "partial_data": None,
         "notes": "See notes.md for context.",
     }
+
+
+_VALID_TARGET_KINDS = {"figure", "table", "numerical_result"}
+_VALID_TARGET_PRIORITIES = {"primary", "secondary"}
+
+
+def _normalise_reproduction_targets(value: Any) -> list[dict[str, Any]]:
+    """Coerce the model's reproduction_targets into a clean list of objects.
+
+    Drops non-dict items, fills missing keys with safe defaults, and clamps
+    ``kind``/``priority`` to their allowed enums so ER can consume the field
+    without re-validating. A target with no usable label or description is
+    dropped entirely (it would give ER nothing to match against).
+    """
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        caption = item.get("caption")
+        what = item.get("what_it_shows")
+        # An item with neither a label nor any description is useless downstream.
+        if not any(isinstance(x, str) and x.strip() for x in (label, caption, what)):
+            continue
+
+        kind = item.get("kind")
+        kind = kind if kind in _VALID_TARGET_KINDS else "numerical_result"
+        priority = item.get("priority")
+        priority = priority if priority in _VALID_TARGET_PRIORITIES else "secondary"
+
+        tid = item.get("id")
+        if not (isinstance(tid, str) and tid.strip()):
+            tid = f"{kind}-{i + 1}"
+
+        page = item.get("source_page")
+        if isinstance(page, bool) or not isinstance(page, int):
+            page = None
+
+        out.append({
+            "id": tid.strip(),
+            "kind": kind,
+            "label": label.strip() if isinstance(label, str) else None,
+            "caption": caption.strip() if isinstance(caption, str) else None,
+            "what_it_shows": what.strip() if isinstance(what, str) else None,
+            "source_page": page,
+            "priority": priority,
+        })
+    return out
 
 
 def _assemble(
@@ -189,6 +259,10 @@ def _assemble(
     }
     for field in _ARRAY_FIELDS:
         value = extracted.get(field)
+        if field == "reproduction_targets":
+            # Object-valued field: normalise each item, then cap.
+            output[field] = _normalise_reproduction_targets(value)[:_MAX_ITEMS]
+            continue
         # Enforce the cap even if the model over-produces, so downstream input
         # (and this file) stay bounded regardless of the model's compliance.
         output[field] = value[:_MAX_ITEMS] if isinstance(value, list) else []

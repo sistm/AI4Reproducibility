@@ -103,6 +103,15 @@ field in the entire pipeline that originates from the manuscript text.
 Downstream agents (Review) copy this field verbatim; they never re-parse
 the PDF.
 
+KBE also emits `reproduction_targets`: the specific figures, tables, and
+headline numerical results a reviewer must reproduce. Each is an object with
+`id`, `kind` (`figure`/`table`/`numerical_result`), `label`, `caption`,
+`what_it_shows`, `source_page`, and `priority`. Because KBE is the only stage
+that reads the manuscript, it owns the *identification* of what to reproduce;
+the ER stage reads this array to know which produced outputs to compare against
+the references. Malformed items (no label/description, unknown `kind`) are
+dropped or clamped during output assembly so ER can consume the field directly.
+
 ### 3.2 CQV — Code-Quality Verification
 
 **Skill**: [`agents/code-quality-verification/SKILL.md`](agents/code-quality-verification/SKILL.md)
