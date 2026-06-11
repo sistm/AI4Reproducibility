@@ -23,6 +23,7 @@ STAGE_MODELS: dict[str, str] = {
     "cqv": "mistral/mistral-large-latest",
     "review": "mistral/mistral-large-latest",
     "critique": "mistral/mistral-large-latest",
+    "er": "mistral/mistral-large-latest",
 }
 
 _ENV_PREFIX = "AI4R_MODEL_"

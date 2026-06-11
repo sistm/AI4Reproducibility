@@ -1,0 +1,48 @@
+name: docker
+
+# Build and push the ER execution image to GHCR only when the Dockerfile
+# changes. Tagged by R version so ER can pull the tag matching a submission's
+# renv.lock. See LOGIC.md §3.3.
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker/Dockerfile
+      - .github/workflows/docker.yml
+  workflow_dispatch:
+    inputs:
+      r_version:
+        description: R version tag to build
+        required: true
+        default: "4.4.2"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Versions ER is expected to encounter. Add tags here as needed;
+        # each entry produces ghcr.io/sistm/ai4reproducibility:r<version>.
+        r_version: ["4.3.2", "4.4.2"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/
+          push: true
+          build-args: |
+            R_VERSION=${{ matrix.r_version }}
+          tags: ghcr.io/sistm/ai4reproducibility:r${{ matrix.r_version }}
