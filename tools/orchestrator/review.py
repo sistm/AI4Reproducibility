@@ -184,6 +184,218 @@ _CQV_STRIP: frozenset[str] = frozenset(
     {"raw_model_output", "partial_data", "notes", "audit_timestamp",
      "dependency_validation", "execution_readiness"}
 )
+# ---------------------------------------------------------------------------
+# LLM visual adjudication (patch 0084)
+# ---------------------------------------------------------------------------
+# ER flags figures where pHash > threshold with needs_visual_review=True.
+# Review resolves these by calling the vision model with paper context
+# (what_it_shows, label, caption from KBE reproduction_targets). ER cannot do
+# this because it is forbidden from reading the manuscript (LOGIC.md §4).
+
+_SUPPORTED_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024   # 5 MB hard cap per image sent to vision model
+
+
+def _render_to_png_bytes(path: Path) -> bytes | None:
+    """Return raw image bytes for the vision model, or None if unsupported.
+
+    PNG/JPEG/GIF/WEBP: read directly.
+    PDF: render first page to PNG via pymupdf (already a runtime dependency).
+    Other formats: return None.
+    """
+    ext = path.suffix.lower()
+    if ext in _SUPPORTED_IMAGE_EXTS:
+        data = path.read_bytes()
+        return data if len(data) <= _MAX_IMAGE_BYTES else None
+    if ext == ".pdf":
+        try:
+            import pymupdf
+            doc = pymupdf.open(str(path))
+            if not doc.page_count:
+                return None
+            pix = doc[0].get_pixmap(matrix=pymupdf.Matrix(2.0, 2.0))
+            return pix.tobytes("png")
+        except Exception:
+            return None
+    return None
+
+
+def _media_type_for(path: Path) -> str:
+    return {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".gif": "image/gif", ".webp": "image/webp",
+    }.get(path.suffix.lower(), "image/png")
+
+
+def _build_vision_messages(
+    reference_path: Path,
+    reproduced_path: Path,
+    target: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """Build multi-modal messages for the vision model; None if encoding fails."""
+    import base64
+
+    ref_bytes = _render_to_png_bytes(reference_path)
+    rep_bytes = _render_to_png_bytes(reproduced_path)
+    if ref_bytes is None or rep_bytes is None:
+        return None
+
+    ref_b64 = base64.standard_b64encode(ref_bytes).decode()
+    rep_b64 = base64.standard_b64encode(rep_bytes).decode()
+
+    label = target.get("label") or "a figure"
+    what  = target.get("what_it_shows") or "(not specified)"
+    cap   = target.get("caption") or ""
+
+    text = (
+        "You are a statistical reproducibility reviewer comparing a figure from a "
+        "biostatistics paper against its reproduced version.\n\n"
+        f"Figure: {label}\n"
+        f"What it shows: {what}\n"
+        + (f"Caption: {cap}\n" if cap else "")
+        + "\nImage 1 is the REFERENCE from the manuscript PDF.\n"
+        "Image 2 is the REPRODUCED version from running the authors' code.\n\n"
+        "Classify the difference:\n"
+        '  "cosmetic"    — rendering differences only (fonts, colours, axis ticks,\n'
+        "                  legend position). Underlying data and conclusions identical.\n"
+        '  "substantive" — data, trends, or reported results differ. Reproducibility\n'
+        "                  failure.\n\n"
+        'Return ONLY JSON — no prose, no fences:\n'
+        '{"classification": "cosmetic" | "substantive", "detail": "<one sentence>"}'
+    )
+
+    return [{
+        "role": "user",
+        "content": [
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": _media_type_for(reference_path),
+                "data": ref_b64,
+            }},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": _media_type_for(reproduced_path),
+                "data": rep_b64,
+            }},
+            {"type": "text", "text": text},
+        ],
+    }]
+
+
+def _adjudicate_one(
+    reference_path: Path,
+    reproduced_path: Path,
+    target: dict[str, Any],
+    model: str,
+    complete_fn: CompleteFn | None,
+) -> dict[str, Any]:
+    """Single vision-model call. Returns adjudication dict; never raises."""
+    messages = _build_vision_messages(reference_path, reproduced_path, target)
+    if messages is None:
+        return {
+            "skipped": True,
+            "reason": "image format unsupported or file exceeds size limit",
+        }
+
+    backend: CompleteFn = complete_fn or with_retry_policy()
+    try:
+        response = backend(model, messages, ())
+        parsed = parse_json_object(response.text)
+    except Exception as exc:
+        return {"error": True, "reason": str(exc), "classification": "substantive"}
+
+    classification = str(parsed.get("classification", "")).lower().strip()
+    if classification not in ("cosmetic", "substantive"):
+        classification = "substantive"      # safe default on unexpected output
+    return {
+        "classification": classification,
+        "detail": str(parsed.get("detail", "")),
+    }
+
+
+def _run_visual_adjudications(
+    er: Any,
+    kbe: Any,
+    review_dir: Path,
+    model: str,
+    complete_fn: CompleteFn | None,
+) -> list[dict[str, Any]]:
+    """Resolve mismatch_flagged figure comparisons via LLM vision.
+
+    Returns an augmented copy of er['comparisons']; statuses updated to
+    'pass'/'fail' where the vision model resolved them. Original er_output.json
+    is never modified. Entries that cannot be adjudicated (missing files,
+    unsupported format, model error) retain needs_visual_review=True with a
+    'visual_adjudication' sub-dict explaining why.
+    """
+    if not isinstance(er, dict):
+        return []
+    comparisons: list[dict[str, Any]] = er.get("comparisons") or []
+    if not comparisons:
+        return list(comparisons)
+
+    targets_by_id: dict[str, dict[str, Any]] = {}
+    if isinstance(kbe, dict):
+        for t in (kbe.get("reproduction_targets") or []):
+            if isinstance(t, dict) and t.get("id"):
+                targets_by_id[t["id"]] = t
+
+    kbe_dir = review_dir / "kbe"
+    augmented: list[dict[str, Any]] = []
+
+    for raw_c in comparisons:
+        c = dict(raw_c)
+
+        if not (c.get("needs_visual_review") and c.get("kind") == "figure"):
+            augmented.append(c)
+            continue
+
+        tid = c.get("artifact", "")
+        target = targets_by_id.get(tid, {})
+
+        ref_rel = target.get("reference_path")
+        if not (isinstance(ref_rel, str) and ref_rel.strip()):
+            c["visual_adjudication"] = {"skipped": True,
+                                        "reason": "no reference_path on target"}
+            augmented.append(c)
+            continue
+
+        ref_path = kbe_dir / ref_rel
+        if not ref_path.is_file():
+            c["visual_adjudication"] = {"skipped": True,
+                                        "reason": f"reference not found: {ref_rel}"}
+            augmented.append(c)
+            continue
+
+        matched = (c.get("metadata") or {}).get("matched_file")
+        if not matched:
+            c["visual_adjudication"] = {"skipped": True,
+                                        "reason": "no matched_file in metadata"}
+            augmented.append(c)
+            continue
+
+        repro_path = Path(matched)
+        if not repro_path.is_file():
+            c["visual_adjudication"] = {"skipped": True,
+                                        "reason": f"reproduced file not found: {matched}"}
+            augmented.append(c)
+            continue
+
+        adj = _adjudicate_one(ref_path, repro_path, target, model, complete_fn)
+        c["visual_adjudication"] = adj
+
+        if not adj.get("skipped") and not adj.get("error"):
+            cls = adj["classification"]
+            c["status"] = "pass" if cls == "cosmetic" else "fail"
+            c["needs_visual_review"] = False
+            c["method"] = "phash+llm"
+            c["detail"] = f"Visual: {cls} — {adj.get('detail', '')}"
+
+        augmented.append(c)
+
+    return augmented
+
+
 # Hard per-source character cap: a guard against future bloat, not a budget.
 _SOURCE_CAP = 20_000
 
@@ -1178,6 +1390,20 @@ def run_review(
         _write_review(review_dir, rm, _failed_md(rm))
         return rm
 
+    # Visual adjudication: resolve mismatch_flagged figures before building the
+    # context blob so the model sees resolved statuses (pass/fail) rather than
+    # "needs_visual_review" placeholders. Runs only when ER has flagged figures.
+    model_name = model or model_for("review")
+    adjudication_log: list[dict[str, Any]] = []
+    if isinstance(er, dict) and any(
+        c.get("needs_visual_review") and c.get("kind") == "figure"
+        for c in (er.get("comparisons") or [])
+    ):
+        augmented = _run_visual_adjudications(er, kbe, review_dir, model_name, complete_fn)
+        if augmented != list(er.get("comparisons") or []):
+            adjudication_log = augmented
+            er = {**er, "comparisons": augmented}   # shallow copy, don't mutate
+
     # assessment_status: complete only when KBE+CQV both succeeded and ER (if
     # it ran) has no unresolved mismatch_flagged or no_artifact_produced findings.
     er_ran = isinstance(er, dict) and er.get("status") not in (
@@ -1195,7 +1421,6 @@ def run_review(
     )
     context = _context_blob(kbe, cqv, er)
     evidence_files = _available_evidence_files(review_dir, review_title)
-    model_name = model or model_for("review")
 
     try:
         core_raw = _run_call(
@@ -1346,6 +1571,12 @@ def run_review(
     rm, md_files = reconcile_review(rm, md_files, draft_snapshot)
 
     _write_review(review_dir, rm, md_files)
+    if adjudication_log:
+        adj_path = review_dir / "review" / "visual_adjudications.json"
+        adj_path.write_text(
+            json.dumps(adjudication_log, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
     return rm
 
 

@@ -14,9 +14,12 @@ from tools.orchestrator.llm import LLMResponse
 from tools.orchestrator.review import (
     _MD_OUTPUTS,
     _SOURCE_CAP,
+    _adjudicate_one,
+    _build_vision_messages,
     _checklist_prompt,
     _context_blob,
     _load_checklist_rubric,
+    _run_visual_adjudications,
     run_review,
 )
 
@@ -1455,7 +1458,8 @@ def test_available_evidence_files_empty_workspace_returns_placeholder(tmp_path):
 
 def test_risk_prompt_with_evidence_files_carries_cite_discipline():
     """The cite-format rules and the available-files block are present
-    universally; when ``evidence_files`` is supplied, the list appears
+    universally
+    when ``evidence_files`` is supplied, the list appears
     inside the block, otherwise a placeholder line is shown. The rules are
     always there because they reference the block by name."""
     from tools.orchestrator.review import _risk_prompt
@@ -1516,8 +1520,8 @@ def test_run_review_wires_evidence_files_into_draft_prompts(tmp_path):
 
     run_review("p", root=tmp_path, complete_fn=capturing_backend)
 
-    # The seed wrote kbe_output.json and cqv_output.json; the draft prompts
-    # should both list them under <available_evidence_files>.
+    # The seed wrote kbe_output.json and cqv_output.json
+    # the draft prompts should both list them under <available_evidence_files>.
     risk_prompts = [p for p in captured if '"risk_score"' in p and "Return ONLY" in p]
     assert risk_prompts, "no risk_matrix draft prompt captured"
     rp = risk_prompts[0]
@@ -1747,3 +1751,285 @@ def test_available_evidence_files_skips_summary_on_malformed_json(tmp_path):
     out = _available_evidence_files(base, "p")
     assert "kbe_output.json" in out
     assert "top-level keys" not in out
+
+
+# ---------------------------------------------------------------------------
+# LLM visual adjudication (patch 0084)
+# ---------------------------------------------------------------------------
+
+
+
+def _write_png(path: Path, colour: tuple[int, int, int] = (200, 100, 50)) -> None:
+    """Write a tiny valid 2x2 PNG. Avoids Pillow dependency in tests."""
+    # Minimal PNG: 2x2 RGB, no compression tricks — just enough for base64 encoding.
+    import struct
+    import zlib
+    def chunk(name: bytes, data: bytes) -> bytes:
+        c = name + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+    raw = b""
+    for _ in range(2):         # 2 rows
+        raw += b"\x00"         # filter byte
+        for __ in range(2):    # 2 pixels
+            raw += bytes(colour)
+    ihdr = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    path.write_bytes(png)
+
+
+def _adj_backend(classification: str = "cosmetic", detail: str = "looks fine"):
+    """Fake complete_fn that returns a canned adjudication JSON."""
+    def backend(model, messages, tools):
+        return LLMResponse(text=json.dumps({
+            "classification": classification, "detail": detail,
+        }))
+    return backend
+
+
+def _mismatch_comparison(tid: str, matched_file: str) -> dict:
+    return {
+        "artifact": tid, "kind": "figure",
+        "status": "mismatch_flagged", "method": "phash",
+        "detail": "pHash distance 18 > 10",
+        "needs_visual_review": True,
+        "metadata": {"hamming_distance": 18, "matched_file": matched_file},
+    }
+
+
+def _make_target(tid: str, ref_rel: str) -> dict:
+    return {
+        "id": tid, "kind": "figure", "label": f"Figure {tid}",
+        "what_it_shows": "classifier performance",
+        "caption": "ROC curves", "source_page": 4,
+        "priority": "primary", "reference_path": ref_rel,
+    }
+
+
+# ---- _build_vision_messages ------------------------------------------------
+
+def test_build_vision_messages_returns_list(tmp_path):
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+    msgs = _build_vision_messages(ref, rep, {"label": "Figure 1"})
+    assert msgs is not None
+    assert len(msgs) == 1
+    content = msgs[0]["content"]
+    assert content[0]["type"] == "image"
+    assert content[1]["type"] == "image"
+    assert content[2]["type"] == "text"
+
+
+def test_build_vision_messages_none_for_unsupported(tmp_path):
+    ref = tmp_path / "ref.svg"
+    rep = tmp_path / "rep.png"
+    ref.write_text("<svg/>")
+    _write_png(rep)
+    assert _build_vision_messages(ref, rep, {}) is None
+
+
+def test_build_vision_messages_includes_context(tmp_path):
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+    target = {"label": "Figure 3", "what_it_shows": "AUC curves", "caption": "ROC"}
+    msgs = _build_vision_messages(ref, rep, target)
+    assert msgs is not None
+    text_block = msgs[0]["content"][2]["text"]
+    assert "Figure 3" in text_block
+    assert "AUC curves" in text_block
+
+
+# ---- _adjudicate_one -------------------------------------------------------
+
+def test_adjudicate_one_cosmetic(tmp_path):
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+    result = _adjudicate_one(ref, rep, {}, "m", _adj_backend("cosmetic", "font differs"))
+    assert result["classification"] == "cosmetic"
+    assert "font differs" in result["detail"]
+
+
+def test_adjudicate_one_substantive(tmp_path):
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+    result = _adjudicate_one(ref, rep, {}, "m", _adj_backend("substantive", "wrong trend"))
+    assert result["classification"] == "substantive"
+
+
+def test_adjudicate_one_bad_classification_defaults_to_substantive(tmp_path):
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+    result = _adjudicate_one(ref, rep, {}, "m", _adj_backend("unknown_value", ""))
+    assert result["classification"] == "substantive"
+
+
+def test_adjudicate_one_model_error_returns_error_dict(tmp_path):
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+
+    def boom(model, messages, tools):
+        raise RuntimeError("network down")
+
+    result = _adjudicate_one(ref, rep, {}, "m", boom)
+    assert result["error"] is True
+    assert result["classification"] == "substantive"  # safe default
+
+
+def test_adjudicate_one_unsupported_format(tmp_path):
+    ref = tmp_path / "ref.svg"
+    rep = tmp_path / "rep.png"
+    ref.write_text("<svg/>")
+    _write_png(rep)
+    result = _adjudicate_one(ref, rep, {}, "m", _adj_backend())
+    assert result["skipped"] is True
+
+
+# ---- _run_visual_adjudications ---------------------------------------------
+
+def test_run_visual_adjudications_cosmetic_becomes_pass(tmp_path):
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+
+    kbe_dir = tmp_path / "kbe"
+    (kbe_dir / "references").mkdir(parents=True)
+    import shutil
+    shutil.copy(ref, kbe_dir / "references" / "fig-1.png")
+
+    er = {"status": "success", "comparisons": [
+        _mismatch_comparison("fig-1", str(rep)),
+    ]}
+    kbe = {"reproduction_targets": [_make_target("fig-1", "references/fig-1.png")]}
+    review_dir = tmp_path
+    result = _run_visual_adjudications(er, kbe, review_dir, "m", _adj_backend("cosmetic"))
+    assert result[0]["status"] == "pass"
+    assert result[0]["needs_visual_review"] is False
+    assert result[0]["visual_adjudication"]["classification"] == "cosmetic"
+
+
+def test_run_visual_adjudications_substantive_becomes_fail(tmp_path):
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+    kbe_dir = tmp_path / "kbe"
+    (kbe_dir / "references").mkdir(parents=True)
+    import shutil
+    shutil.copy(ref, kbe_dir / "references" / "fig-1.png")
+
+    er = {"status": "success", "comparisons": [_mismatch_comparison("fig-1", str(rep))]}
+    kbe = {"reproduction_targets": [_make_target("fig-1", "references/fig-1.png")]}
+    result = _run_visual_adjudications(er, kbe, tmp_path, "m", _adj_backend("substantive"))
+    assert result[0]["status"] == "fail"
+
+
+def test_run_visual_adjudications_skips_non_figure(tmp_path):
+    er = {"status": "success", "comparisons": [{
+        "artifact": "tbl-1", "kind": "table",
+        "status": "mismatch_flagged", "needs_visual_review": True,
+        "method": "none", "detail": "", "metadata": {},
+    }]}
+    result = _run_visual_adjudications(er, {}, tmp_path, "m", _adj_backend())
+    assert result[0]["status"] == "mismatch_flagged"   # unchanged
+
+
+def test_run_visual_adjudications_skips_missing_reference(tmp_path):
+    rep = tmp_path / "rep.png"
+    _write_png(rep)
+    (tmp_path / "kbe").mkdir()
+    er = {"status": "success", "comparisons": [_mismatch_comparison("fig-1", str(rep))]}
+    kbe = {"reproduction_targets": [_make_target("fig-1", "references/missing.png")]}
+    result = _run_visual_adjudications(er, kbe, tmp_path, "m", _adj_backend())
+    assert result[0]["visual_adjudication"]["skipped"] is True
+    assert result[0]["status"] == "mismatch_flagged"   # unchanged
+
+
+def test_run_visual_adjudications_skips_no_matched_file(tmp_path):
+    ref = tmp_path / "ref.png"
+    _write_png(ref)
+    kbe_dir = tmp_path / "kbe"
+    (kbe_dir / "references").mkdir(parents=True)
+    import shutil
+    shutil.copy(ref, kbe_dir / "references" / "fig-1.png")
+
+    er = {"status": "success", "comparisons": [{
+        "artifact": "fig-1", "kind": "figure",
+        "status": "mismatch_flagged", "needs_visual_review": True,
+        "method": "phash", "detail": "", "metadata": {},  # no matched_file
+    }]}
+    kbe = {"reproduction_targets": [_make_target("fig-1", "references/fig-1.png")]}
+    result = _run_visual_adjudications(er, kbe, tmp_path, "m", _adj_backend())
+    assert result[0]["visual_adjudication"]["skipped"] is True
+
+
+def test_run_review_writes_visual_adjudications_file(tmp_path):
+    """When adjudications run, visual_adjudications.json is written to review/."""
+    ref = tmp_path / "ref.png"
+    rep = tmp_path / "rep.png"
+    _write_png(ref)
+    _write_png(rep)
+
+    review_dir = tmp_path / "ai4r" / "p"
+    kbe_dir = review_dir / "kbe"
+    refs_dir = kbe_dir / "references"
+    refs_dir.mkdir(parents=True)
+    import shutil
+    shutil.copy(ref, refs_dir / "fig-1.png")
+
+    (kbe_dir / "kbe_output.json").write_text(json.dumps({
+        "paper_id": "p", "status": "success", "paper_title": "T",
+        "reproduction_targets": [_make_target("fig-1", "references/fig-1.png")],
+    }))
+
+    cqv_dir = review_dir / "cqv"
+    cqv_dir.mkdir(parents=True)
+    (cqv_dir / "cqv_output.json").write_text(json.dumps({
+        "paper_id": "p", "status": "success",
+    }))
+
+    er_dir = review_dir / "er"
+    er_dir.mkdir(parents=True)
+    (er_dir / "er_output.json").write_text(json.dumps({
+        "paper_id": "p", "status": "success",
+        "comparisons": [_mismatch_comparison("fig-1", str(rep))],
+    }))
+
+    def backend(model, messages, tools):
+        # Vision call has image content; other calls have text content.
+        first = messages[-1]["content"]
+        if isinstance(first, list):
+            return LLMResponse(text=json.dumps({
+                "classification": "cosmetic", "detail": "only font differs",
+            }))
+        # Fallback for any text-based model call
+        return LLMResponse(text=json.dumps({
+            "risk_score": 20, "risk_level": "LOW", "verdict": "ACCEPT",
+            "issues": {"critical": [], "major": [], "minor": [], "suggestions": []},
+            "required_changes": [],
+        }))
+
+    run_review("p", root=tmp_path, complete_fn=backend)
+
+    adj_file = review_dir / "review" / "visual_adjudications.json"
+    assert adj_file.is_file()
+    adjs = json.loads(adj_file.read_text())
+    adj = next(a for a in adjs if a.get("artifact") == "fig-1")
+    assert adj["status"] == "pass"
+    assert adj["visual_adjudication"]["classification"] == "cosmetic"
