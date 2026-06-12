@@ -294,3 +294,77 @@ def test_global_state_pass_no_superassign(tmp_path):
     (tmp_path / "a.R").write_text("x <- 1\ny <- x + 2\n")
     r = run_static_check("check_global_state_mutation", tmp_path)
     assert r["status"] == "pass"
+
+
+# ---------------------------------------------------------------------------
+# patch 0070 — dispatch-level: language filtering and result serialisation
+# ---------------------------------------------------------------------------
+
+def test_get_applicable_r_only_excludes_python():
+    """R-only submission: Python-only checks excluded; R-only and universal included."""
+    from tools.cqv_agent.static_checks.dispatch import APPLICABLE_TO, get_applicable_checks
+
+    result = get_applicable_checks({"r"})
+    python_only = [c for c, langs in APPLICABLE_TO.items() if langs == ["python"]]
+    r_only = [c for c, langs in APPLICABLE_TO.items() if langs == ["r"]]
+    universal = [c for c, langs in APPLICABLE_TO.items() if langs == ["*"]]
+
+    for c in python_only:
+        assert c not in result, f"Python-only check {c} should be excluded for R-only"
+    for c in r_only + universal:
+        assert c in result, f"R/universal check {c} should be included for R-only"
+
+
+def test_get_applicable_python_only_excludes_r():
+    """Python-only submission: R-only checks excluded; Python-only and universal included."""
+    from tools.cqv_agent.static_checks.dispatch import APPLICABLE_TO, get_applicable_checks
+
+    result = get_applicable_checks({"python"})
+    r_only = [c for c, langs in APPLICABLE_TO.items() if langs == ["r"]]
+    python_only = [c for c, langs in APPLICABLE_TO.items() if langs == ["python"]]
+    universal = [c for c, langs in APPLICABLE_TO.items() if langs == ["*"]]
+
+    for c in r_only:
+        assert c not in result, f"R-only check {c} should be excluded for Python-only"
+    for c in python_only + universal:
+        assert c in result, f"Python/universal check {c} should be included for Python-only"
+
+
+def test_get_applicable_mixed_includes_all():
+    """Mixed R+Python submission: every registered check is applicable."""
+    from tools.cqv_agent.static_checks.dispatch import REGISTRY, get_applicable_checks
+
+    result = get_applicable_checks({"r", "python"})
+    assert set(result) == set(REGISTRY.keys())
+
+
+def test_get_applicable_empty_languages_only_universal():
+    """Unknown/empty language set: only universal checks included."""
+    from tools.cqv_agent.static_checks.dispatch import APPLICABLE_TO, get_applicable_checks
+
+    result = get_applicable_checks(set())
+    universal = {c for c, langs in APPLICABLE_TO.items() if langs == ["*"]}
+    non_universal = {c for c, langs in APPLICABLE_TO.items() if langs != ["*"]}
+
+    assert universal == set(result)
+    for c in non_universal:
+        assert c not in result
+
+
+def test_check_result_to_dict_has_required_keys():
+    """CheckResult.to_dict() always returns the five contract keys."""
+    from tools.cqv_agent.static_checks._common import CheckResult
+
+    r = CheckResult(
+        tool_id="check_absolute_paths",
+        status="pass",
+        summary="All good.",
+        evidence=[{"file": "a.R", "line": 1}],
+        metadata={"total": 0},
+    )
+    d = r.to_dict()
+    for key in ("tool_id", "status", "summary", "evidence", "metadata"):
+        assert key in d, f"Missing key: {key}"
+    assert d["tool_id"] == "check_absolute_paths"
+    assert d["status"] == "pass"
+    assert d["evidence"] == [{"file": "a.R", "line": 1}]
