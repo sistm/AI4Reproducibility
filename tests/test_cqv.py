@@ -634,3 +634,133 @@ def test_partial_with_failure_mode_not_upgraded(tmp_path):
     out = run_cqv("parse-fail", root=tmp_path, complete_fn=_fake_returning("not json"))
     assert out["status"] == "partial"
     assert out.get("failure_mode") == "output_parse_failed"
+
+
+
+
+# ---------------------------------------------------------------------------
+# execution_environment extraction (patch 0082)
+# ---------------------------------------------------------------------------
+
+
+def _seed_renv_lock(assets: Path, r_version: str = "4.3.2", packages: dict | None = None) -> None:
+    """Write a minimal renv.lock into assets/."""
+    packages = packages or {"ggplot2": {"Version": "3.5.0"}}
+    lock = {
+        "R": {"Version": r_version},
+        "Packages": {name: {"Version": v} if isinstance(v, str) else v
+                     for name, v in packages.items()},
+    }
+    (assets / "renv.lock").write_text(json.dumps(lock))
+
+
+def test_execution_environment_present_on_success(tmp_path):
+    """Successful CQV run includes execution_environment in output."""
+    assets = _seed_assets(tmp_path, "env-ok")
+    _seed_renv_lock(assets, r_version="4.4.1")
+    out = run_cqv("env-ok", root=tmp_path, complete_fn=_fake_returning("{}"))
+    assert "execution_environment" in out
+    env = out["execution_environment"]
+    assert env["lockfile_present"] is True
+    assert env["r_version"] == "4.4.1"
+    assert "ggplot2" in env["packages"]
+
+
+def test_execution_environment_no_lockfile(tmp_path):
+    """When renv.lock is absent, lockfile_present is False."""
+    _seed_assets(tmp_path, "no-lock")
+    out = run_cqv("no-lock", root=tmp_path, complete_fn=_fake_returning("{}"))
+    env = out["execution_environment"]
+    assert env["lockfile_present"] is False
+
+
+def test_execution_environment_on_failure_output(tmp_path):
+    """execution_environment key is present even on bad-title failure."""
+    out = run_cqv("Bad Title", root=tmp_path, complete_fn=_fake_returning("{}"))
+    assert "execution_environment" in out
+    assert out["execution_environment"] is None
+
+
+def test_execution_environment_on_llm_failure(tmp_path):
+    """LLM transport failure still writes execution_environment."""
+
+    def boom(model, messages, tools):
+        raise RuntimeError("network down")
+
+    assets = _seed_assets(tmp_path, "llm-fail")
+    _seed_renv_lock(assets)
+    out = run_cqv("llm-fail", root=tmp_path, complete_fn=boom)
+    assert out["status"] == "failed"
+    assert out["execution_environment"]["lockfile_present"] is True
+
+
+def test_execution_environment_on_parse_failure(tmp_path):
+    """Parse failure still writes execution_environment."""
+    assets = _seed_assets(tmp_path, "parse-fail-env")
+    _seed_renv_lock(assets, r_version="4.2.0")
+    out = run_cqv("parse-fail-env", root=tmp_path,
+                  complete_fn=_fake_returning("not json at all"))
+    assert out["status"] == "partial"
+    assert out["execution_environment"]["r_version"] == "4.2.0"
+
+
+def test_execution_environment_written_to_disk(tmp_path):
+    """execution_environment is persisted in cqv_output.json on disk."""
+    assets = _seed_assets(tmp_path, "disk-env")
+    _seed_renv_lock(assets, packages={"lme4": {"Version": "1.1-35"}})
+    run_cqv("disk-env", root=tmp_path, complete_fn=_fake_returning("{}"))
+    on_disk = json.loads(
+        (tmp_path / "ai4r" / "disk-env" / "cqv" / "cqv_output.json").read_text()
+    )
+    assert on_disk["execution_environment"]["packages"]["lme4"] == "1.1-35"
+
+
+def test_er_reads_execution_environment_from_cqv(tmp_path):
+    """ER uses execution_environment from cqv_output.json rather than re-parsing."""
+    from tools.orchestrator.er import run_er
+    from tools.orchestrator.er_docker import RunResult
+    from tools.orchestrator.llm import LLMResponse
+
+    # Build a full review directory.
+    assets = tmp_path / "ai4r" / "er-cqv-test" / "input" / "assets"
+    assets.mkdir(parents=True)
+    (assets / "main.R").write_text("x <- 1\n")
+    (assets / "README.md").write_text("Runs in under a minute.")
+    (assets / "renv.lock").write_text(json.dumps({
+        "R": {"Version": "4.3.2"}, "Packages": {}
+    }))
+
+    # CQV output pre-written with execution_environment.
+    cqv_dir = tmp_path / "ai4r" / "er-cqv-test" / "cqv"
+    cqv_dir.mkdir(parents=True)
+    (cqv_dir / "cqv_output.json").write_text(json.dumps({
+        "paper_id": "er-cqv-test", "status": "success",
+        "execution_environment": {
+            "lockfile_present": True,
+            "r_version": "4.3.2",
+            "packages": {"ggplot2": "3.5.0"},
+        },
+    }))
+
+    def preflight(model, messages, tools):
+        return LLMResponse(text=json.dumps({
+            "runtime_documented": True, "estimated_seconds": 30,
+            "runtime_is_open_ended": False,
+            "intermediate_results_documented": False,
+            "checkpoint_scripts": [], "rationale": "fast",
+        }))
+
+    seq = [
+        RunResult(returncode=0, stdout="restored", stderr=""),
+        RunResult(returncode=0, stdout="done", stderr=""),
+    ]
+    calls: list = []
+
+    def fake_run(req):
+        calls.append(req)
+        return seq[len(calls) - 1]
+
+    out = run_er("er-cqv-test", root=tmp_path, run_fn=fake_run, complete_fn=preflight)
+    # ER should have used r_version from cqv_output.json.
+    assert out["image"].endswith(":r4.3.2")
+    assert out["execution_environment"]["r_version"] == "4.3.2"

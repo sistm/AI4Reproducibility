@@ -346,6 +346,34 @@ def _assert_output_schema(obj: dict[str, Any]) -> None:
         ) from exc
 
 
+def _extract_execution_environment(assets_dir: Path) -> dict[str, Any]:
+    """Parse renv.lock for R version and package list (no LLM, no side effects).
+
+    CQV owns this extraction — ER reads execution_environment from
+    cqv_output.json and only falls back to parsing renv.lock itself when CQV
+    did not run or its output is absent (LOGIC.md §3.2, §3.3).
+    """
+    lockfile: Path | None = None
+    for p in assets_dir.rglob("renv.lock"):
+        if p.is_file():
+            lockfile = p
+            break
+    if lockfile is None:
+        return {"lockfile_present": False}
+    try:
+        data = json.loads(lockfile.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"lockfile_present": True, "parse_error": True}
+    return {
+        "lockfile_present": True,
+        "r_version": (data.get("R") or {}).get("Version"),
+        "packages": {
+            name: (pkg or {}).get("Version")
+            for name, pkg in (data.get("Packages") or {}).items()
+        },
+    }
+
+
 def _failure_output(
     review_title: str, failure_mode: str, failure_reason: str, status: str = "failed"
 ) -> dict[str, Any]:
@@ -362,6 +390,7 @@ def _failure_output(
         "reproducibility_blockers": [_default_blocker(failure_reason)],
         "partial_data": None,
         "notes": "See repo_analysis.md for context.",
+        "execution_environment": None,
     }
 
 
@@ -689,6 +718,7 @@ def run_cqv(
             status="failed",
         )
         _set_check_coverage(output, completed, skipped)
+        output["execution_environment"] = _extract_execution_environment(assets_dir)
         _write_outputs(review_dir, output)
         return output
 
@@ -727,6 +757,7 @@ def run_cqv(
             # cleaned text), so future analysis can see exactly what was emitted.
             output["notes"] = f"Raw model output:\n{text}"
             _set_check_coverage(output, completed, skipped)
+            output["execution_environment"] = _extract_execution_environment(assets_dir)
             _write_outputs(review_dir, output)
             return output
 
@@ -773,6 +804,7 @@ def run_cqv(
     _apply_stat_layer(
         output, review_dir, assets_dir, model=model, complete_fn=complete_fn
     )
+    output["execution_environment"] = _extract_execution_environment(assets_dir)
     _write_outputs(review_dir, output)
     return output
 
