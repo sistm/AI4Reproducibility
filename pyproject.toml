@@ -39,6 +39,8 @@ classifiers = [
 # Loose lower bounds are intentional; tighten if you hit incompatibilities.
 dependencies = [
     "pymupdf>=1.24",
+    "Pillow>=10.0",       # image ops used by kbe_extract (embedded-image ranking)
+                          # and er_docker_compare (pHash figure comparison)
     "pdfminer.six>=20231228",
 ]
 
@@ -128,6 +130,11 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 pythonpath = ["."]
 norecursedirs = ["tests/fixtures"]
+filterwarnings = [
+    # pymupdf uses SWIG-generated C bindings; these DeprecationWarnings are an
+    # upstream issue in the SWIG runtime and are not actionable from this codebase.
+    "ignore:builtin type.*has no __module__:DeprecationWarning",
+]
 
 [tool.mypy]
 python_version = "3.12"
