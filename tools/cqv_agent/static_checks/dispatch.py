@@ -19,20 +19,15 @@ from typing import Any
 
 from ._common import CheckResult
 
-# Stubs
+# Stubs (AST-requiring; deferred to Phase 3 / tree-sitter-r)
 from ._stubs import (
     check_dead_code,
     check_duplicate_code_blocks,
     check_error_handling_coverage,
-    check_function_docs_present,
     check_function_signatures,
-    check_global_state_mutation,
     check_growing_vectors,
-    check_imports_complete,
     check_loop_invariants,
-    check_no_unbounded_loops,
     check_parse_success,
-    check_set_seed_scope,
     check_undefined_references,
 )
 from .danger_patterns import (
@@ -62,6 +57,15 @@ from .file_inventory import (
 from .path_checks import (
     check_absolute_paths,
     check_path_helpers,
+)
+
+# Regex-tractable R heuristics (patch 0071)
+from .r_heuristics import (
+    check_function_docs_present,
+    check_global_state_mutation,
+    check_imports_complete,
+    check_no_unbounded_loops,
+    check_set_seed_scope,
 )
 
 CheckFn = Callable[..., CheckResult]

@@ -52,7 +52,8 @@ def test_list_static_checks_reports_implementation_status():
     info = list_static_checks()
     assert "check_absolute_paths" in info
     assert info["check_absolute_paths"]["implemented"] is True
-    assert info["check_set_seed_scope"]["implemented"] is False
+    assert info["check_set_seed_scope"]["implemented"] is True   # patch 0071
+    assert info["check_parse_success"]["implemented"] is False   # still stubbed
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +81,12 @@ CLEAN_EXPECTED_PASS = [
     "check_no_attach",
     "check_no_arbitrary_downloads",
     "check_no_unsafe_deserialization",
+    # patch 0071 — regex-tractable R heuristics
+    "check_set_seed_scope",
+    "check_imports_complete",
+    "check_function_docs_present",
+    "check_no_unbounded_loops",
+    "check_global_state_mutation",
 ]
 
 
@@ -134,19 +141,14 @@ def test_dirty_repo_fails(tool_id: str, expected_statuses: tuple[str, ...]):
 # ---------------------------------------------------------------------------
 
 STUBBED_CHECKS = [
-    "check_set_seed_scope",
     "check_parse_success",
     "check_undefined_references",
     "check_function_signatures",
-    "check_imports_complete",
     "check_duplicate_code_blocks",
     "check_dead_code",
-    "check_global_state_mutation",
     "check_growing_vectors",
     "check_loop_invariants",
-    "check_no_unbounded_loops",
     "check_error_handling_coverage",
-    "check_function_docs_present",
 ]
 
 
@@ -155,3 +157,140 @@ def test_stubs_return_not_implemented(tool_id: str):
     result = run_static_check(tool_id, CLEAN)
     assert result["status"] == "not_implemented"
     assert "reason" in result["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# patch 0071 — r_heuristics: ~3 tests per check
+# ---------------------------------------------------------------------------
+
+# check_set_seed_scope -------------------------------------------------------
+
+def test_set_seed_scope_pass_seed_before_rng(tmp_path):
+    (tmp_path / "a.R").write_text("set.seed(42)\nx <- runif(10)\n")
+    r = run_static_check("check_set_seed_scope", tmp_path)
+    assert r["status"] == "pass"
+
+
+def test_set_seed_scope_fail_rng_before_seed(tmp_path):
+    (tmp_path / "a.R").write_text("x <- runif(10)\nset.seed(42)\n")
+    r = run_static_check("check_set_seed_scope", tmp_path)
+    assert r["status"] == "fail"
+    assert r["evidence"][0]["line"] == 1
+
+
+def test_set_seed_scope_fail_no_seed_at_all(tmp_path):
+    (tmp_path / "a.R").write_text("x <- rnorm(100)\n")
+    r = run_static_check("check_set_seed_scope", tmp_path)
+    assert r["status"] == "fail"
+
+
+def test_set_seed_scope_pass_no_rng_calls(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1 + 1\n")
+    r = run_static_check("check_set_seed_scope", tmp_path)
+    assert r["status"] == "pass"
+
+
+# check_imports_complete -----------------------------------------------------
+
+def test_imports_complete_pass_declared(tmp_path):
+    (tmp_path / "a.R").write_text("library(dplyr)\nx <- dplyr::filter(df, x > 0)\n")
+    r = run_static_check("check_imports_complete", tmp_path)
+    assert r["status"] == "pass"
+
+
+def test_imports_complete_fail_undeclared(tmp_path):
+    (tmp_path / "a.R").write_text("x <- dplyr::filter(df, x > 0)\n")
+    r = run_static_check("check_imports_complete", tmp_path)
+    assert r["status"] == "fail"
+    assert any("dplyr" in e["note"] for e in r["evidence"])
+
+
+def test_imports_complete_pass_no_namespace_uses(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1\n")
+    r = run_static_check("check_imports_complete", tmp_path)
+    assert r["status"] == "pass"
+
+
+# check_function_docs_present ------------------------------------------------
+
+def test_function_docs_pass_comment_present(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "# Compute the square of x.\nfoo <- function(x) x^2\n"
+    )
+    r = run_static_check("check_function_docs_present", tmp_path)
+    assert r["status"] == "pass"
+
+
+def test_function_docs_fail_no_comment(tmp_path):
+    (tmp_path / "a.R").write_text("foo <- function(x) x^2\n")
+    r = run_static_check("check_function_docs_present", tmp_path)
+    assert r["status"] == "fail"
+    assert r["evidence"][0]["line"] == 1
+
+
+def test_function_docs_fail_function_at_top_of_file(tmp_path):
+    """No preceding line at all — must not crash, must fail."""
+    (tmp_path / "a.R").write_text("foo <- function(x) {\n  x\n}\n")
+    r = run_static_check("check_function_docs_present", tmp_path)
+    assert r["status"] == "fail"
+
+
+def test_function_docs_pass_no_functions(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1\n")
+    r = run_static_check("check_function_docs_present", tmp_path)
+    assert r["status"] == "pass"
+
+
+# check_no_unbounded_loops ---------------------------------------------------
+
+def test_unbounded_loops_pass_while_true_with_break(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "i <- 0\nwhile (TRUE) {\n  i <- i + 1\n  if (i > 10) break\n}\n"
+    )
+    r = run_static_check("check_no_unbounded_loops", tmp_path)
+    assert r["status"] == "pass"
+
+
+def test_unbounded_loops_fail_while_true_no_break(tmp_path):
+    (tmp_path / "a.R").write_text("while (TRUE) {\n  x <- 1\n}\n")
+    r = run_static_check("check_no_unbounded_loops", tmp_path)
+    assert r["status"] == "fail"
+    assert r["evidence"][0]["line"] == 1
+
+
+def test_unbounded_loops_fail_repeat_no_break(tmp_path):
+    (tmp_path / "a.R").write_text("repeat {\n  x <- x + 1\n}\n")
+    r = run_static_check("check_no_unbounded_loops", tmp_path)
+    assert r["status"] == "fail"
+
+
+def test_unbounded_loops_pass_no_loops(tmp_path):
+    (tmp_path / "a.R").write_text("for (i in 1:10) { x <- i }\n")
+    r = run_static_check("check_no_unbounded_loops", tmp_path)
+    assert r["status"] == "pass"
+
+
+# check_global_state_mutation ------------------------------------------------
+
+def test_global_state_pass_superassign_inside_function(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "counter <- 0\n"
+        "increment <- function() {\n"
+        "  counter <<- counter + 1\n"
+        "}\n"
+    )
+    r = run_static_check("check_global_state_mutation", tmp_path)
+    assert r["status"] == "pass"
+
+
+def test_global_state_fail_toplevel_superassign(tmp_path):
+    (tmp_path / "a.R").write_text("x <<- 42\n")
+    r = run_static_check("check_global_state_mutation", tmp_path)
+    assert r["status"] == "fail"
+    assert r["evidence"][0]["line"] == 1
+
+
+def test_global_state_pass_no_superassign(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1\ny <- x + 2\n")
+    r = run_static_check("check_global_state_mutation", tmp_path)
+    assert r["status"] == "pass"
