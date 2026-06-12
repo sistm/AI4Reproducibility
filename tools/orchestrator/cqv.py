@@ -447,20 +447,29 @@ def _repair_evidence_file_ref(file_ref: str, assets_dir: Path) -> str | None:
     """
     try:
         base = assets_dir.resolve()
-        # Track candidates by their resolved target so case-insensitive
-        # filesystems (macOS APFS by default, Windows NTFS) don't double-count
-        # .R / .r and .Rmd / .rmd as separate matches. Key: resolved Path;
-        # value: the first extension-form string we saw resolving to it.
-        seen_targets: dict[Path, str] = {}
+        # Deduplicate by (st_dev, st_ino) — the true filesystem identity of a
+        # file — so that case-insensitive filesystems (macOS APFS, Windows NTFS)
+        # don't double-count .R / .r as separate matches.
+        # Path.resolve() does NOT normalise case on macOS, so keying by the
+        # resolved Path object would incorrectly count foo.R and foo.r as two
+        # distinct candidates even when they refer to the same inode.
+        seen_inodes: dict[tuple[int, int], str] = {}
         for ext in _EVIDENCE_REPAIR_EXTENSIONS:
             candidate_ref = file_ref + ext
             target = (assets_dir / candidate_ref).resolve()
             if base != target and base not in target.parents:
                 continue  # escaped the assets directory
-            if target.is_file() and target not in seen_targets:
-                seen_targets[target] = candidate_ref
-        if len(seen_targets) == 1:
-            return next(iter(seen_targets.values()))
+            if not target.is_file():
+                continue
+            try:
+                st = target.stat()
+                inode_key = (st.st_dev, st.st_ino)
+            except OSError:
+                continue
+            if inode_key not in seen_inodes:
+                seen_inodes[inode_key] = candidate_ref
+        if len(seen_inodes) == 1:
+            return next(iter(seen_inodes.values()))
     except (OSError, ValueError):
         return None
     return None
