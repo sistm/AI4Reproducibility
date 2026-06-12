@@ -18,10 +18,17 @@ Review never reads the manuscript PDF or the code itself — KBE and CQV (and,
 when enabled, ER) do that. Start by reading their JSON outputs:
 
 - `kbe/kbe_output.json` — extracted paper knowledge (title, assumptions,
-  statistical methods, data-generation processes, reproducibility gaps).
+  statistical methods, data-generation processes, reproducibility gaps,
+  **reproduction_targets** — the specific figures, tables, and numerical
+  results KBE identified for reproduction).
 - `cqv/cqv_output.json` — the code-quality audit (repository audit, dependency
   validation, reproducibility blockers, execution readiness).
-- `er/er_output.json` — execution results, when ER is enabled (skipped in v0).
+- `er/er_output.json` — execution results when ER ran. Key fields:
+  - `status` — success / failed / skipped / skipped_no_runtime_docs /
+    skipped_no_intermediate_docs / skipped_no_readme
+  - `checklist_flags` — reproducibility flags raised by ER (see §ER below)
+  - `comparisons[]` — per-target comparison results (see §ER below)
+  - `run.artifacts` — list of files produced by the Docker run
 
 ### 2. Assess coverage and degradation
 
@@ -39,7 +46,11 @@ Output **`exhaustive_audit_report.md`** using template in `assets/audit-report-t
 - Comprehensive audit synthesising the KBE and CQV findings
 - Inputs section quoting each upstream `status` (and any `failure_mode`)
 - Code-quality findings as reported by CQV, cited by evidence path
-- Execution results from ER when enabled (omitted while ER is skipped)
+- **ER section** (when ER ran, not skipped): include a reproduction table
+  with one row per `comparisons[]` entry — target label, kind, status verdict,
+  and the matched produced file. `mismatch_flagged` rows should read "Visual
+  comparison required — pHash Hamming distance N". `pass` rows should be
+  listed as positive evidence. `no_artifact_produced` rows are findings.
 
 ### 4. Generate Final Review Summary
 
@@ -101,6 +112,33 @@ All outputs saved to: `/ai4r/{review_title}/review/`
 
 ---
 
+## Interpreting ER comparison results
+
+### Checklist flags
+
+| Flag | Meaning | Minimum verdict impact |
+|---|---|---|
+| `MISSING_RUNTIME_DOCS` | README omits expected runtime | Major revision |
+| `MISSING_INTERMEDIATE_DOCS` | Runtime > budget, no checkpoint docs | Major revision |
+| `MISSING_README` | No README in supplement | Major revision |
+| `MISSING_REPRODUCED_ARTIFACTS` | ≥1 target produced no output after run | Major/Critical |
+
+### Per-target comparison statuses
+
+| Status | Meaning | Review action |
+|---|---|---|
+| `pass` | Reproduced within tolerance | Positive evidence; lower risk score |
+| `fail` | Numerical mismatch confirmed | Critical (primary result) or Major issue |
+| `mismatch_flagged` + `needs_visual_review: true` | pHash over threshold; unresolved | Note "visual comparison required" as Major; give Hamming distance |
+| `no_artifact_produced` | Code ran but target output absent | Major issue per missing target |
+| `no_reference` | KBE could not extract reference from PDF | Audit gap; do not penalise |
+
+For `mismatch_flagged` items: do **not** mark as pass or fail — they are
+explicitly unresolved pending visual inspection. State the Hamming distance and
+flag for the editor's attention.
+
+---
+
 ## Principles
 
 **Synthesise, don't re-derive** — Build the verdict from the KBE and CQV outputs; never read the paper or run code yourself.
@@ -142,8 +180,13 @@ field. Apply these rules:
 | KBE `partial`                    | Use only `partial_data.sections_extracted`. Mark items that depend on missing sections as **Unverified**.                                            |
 | CQV `failed`                     | Do not pretend to have audited the code. Every code-quality, dependency, and reproducibility checklist item becomes **Unverified**.                  |
 | CQV `partial`                    | Use only `partial_data.checks_completed`. Items dependent on failed/skipped checks become **Unverified**.                                            |
-| ER `skipped` (default)           | No action; ER is expected to be skipped in v0. Do not penalize.                                                                                      |
-| ER `failed` (when enabled)       | Report execution failure as a finding. Do not infer results from CQV alone.                                                                          |
+| ER `skipped` (default v0)              | No action; ER is expected to be skipped. Do not penalize.                                                                                           |
+| ER `skipped_no_runtime_docs`           | Surface `MISSING_RUNTIME_DOCS` flag as a major-revision issue: README does not document expected runtime.                                            |
+| ER `skipped_no_intermediate_docs`      | Surface `MISSING_INTERMEDIATE_DOCS` flag as a major-revision issue.                                                                                 |
+| ER `skipped_no_readme`                 | Surface `MISSING_README` as a major-revision issue (CQV also flags `check_readme_present`).                                                         |
+| ER `failed` (execution failed)         | Report execution failure as a finding. Each `no_artifact_produced` comparison still warrants a major issue.                                         |
+| ER `success` with `fail` comparisons   | Each failed comparison is a Critical or Major issue depending on whether it is a primary or secondary result.                                       |
+| ER `success` with `mismatch_flagged`   | Note each as "visual comparison required"; do not assign pass or fail. Include Hamming distance.                                                    |
 
 "Unverified" items count as evidence gaps in the risk model. They MUST be
 listed explicitly in `checklist.md` with a brief reason (e.g. "Unverified —

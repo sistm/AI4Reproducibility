@@ -463,12 +463,83 @@ def test_er_none_omitted_from_blob():
     assert "cqv_output:" in blob
 
 
-def test_er_present_included_unstripped():
-    """ER output is passed through as-is (no strip set)."""
-    er = {"status": "skipped", "reason": "deferred", "internal_note": "keep this"}
+def test_er_present_skipped_compact():
+    """Skipped ER output stays compact (no preflight/env internals)."""
+    er = {"status": "skipped", "reason": "deferred",
+          "preflight": {"very": "verbose"}, "execution_environment": {"r": "4"}}
     blob = _context_blob(None, None, er)
     assert "er_output:" in blob
-    assert "internal_note" in blob
+    assert "preflight" not in blob
+    assert "execution_environment" not in blob
+
+
+def test_er_present_executed_uses_structured_summary():
+    """Executed ER uses the structured summary, not raw JSON."""
+    er = {
+        "status": "success",
+        "execution_mode": "full_run",
+        "checklist_flags": ["MISSING_REPRODUCED_ARTIFACTS"],
+        "run": {"returncode": 0, "timed_out": False, "artifacts": ["fig1.png"]},
+        "comparisons": [{
+            "artifact": "fig-1", "kind": "figure",
+            "status": "no_artifact_produced", "method": "none",
+            "detail": "no produced file matched", "needs_visual_review": False,
+            "metadata": {},
+        }],
+    }
+    blob = _context_blob(None, None, er)
+    assert "er_output:" in blob
+    assert "MISSING_REPRODUCED_ARTIFACTS" in blob
+    assert "no_artifact_produced" in blob.lower() or "NOT PRODUCED" in blob
+
+
+def test_er_context_mismatch_flagged_shown():
+    er = {
+        "status": "success", "execution_mode": "full_run",
+        "checklist_flags": [],
+        "run": {"returncode": 0, "timed_out": False, "artifacts": ["fig1.png"]},
+        "comparisons": [{
+            "artifact": "fig-1", "kind": "figure",
+            "status": "mismatch_flagged", "method": "phash",
+            "detail": "pHash distance 22 > 10",
+            "needs_visual_review": True,
+            "metadata": {"hamming_distance": 22},
+        }],
+    }
+    blob = _context_blob(None, None, er)
+    assert "visual" in blob.lower()
+    assert "22" in blob
+
+
+def test_er_context_pass_shown():
+    er = {
+        "status": "success", "execution_mode": "full_run",
+        "checklist_flags": [],
+        "run": {"returncode": 0, "timed_out": False, "artifacts": ["fig1.png"]},
+        "comparisons": [{
+            "artifact": "fig-1", "kind": "figure",
+            "status": "pass", "method": "phash",
+            "detail": "pHash distance 2 ≤ 10",
+            "needs_visual_review": False,
+            "metadata": {"hamming_distance": 2},
+        }],
+    }
+    blob = _context_blob(None, None, er)
+    assert "REPRODUCED" in blob
+
+
+def test_risk_prompt_contains_er_rules():
+    from tools.orchestrator.review import _risk_prompt
+    prompt = _risk_prompt("ctx", "complete")
+    assert "MISSING_RUNTIME_DOCS" in prompt
+    assert "mismatch_flagged" in prompt
+    assert "no_artifact_produced" in prompt
+
+
+def test_checklist_prompt_contains_er_rules():
+    prompt = _checklist_prompt("ctx", "complete")
+    assert "mismatch_flagged" in prompt
+    assert "MISSING_REPRODUCED_ARTIFACTS" in prompt
 
 
 # ---------------------------------------------------------------------------

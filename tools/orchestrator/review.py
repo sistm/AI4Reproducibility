@@ -187,6 +187,109 @@ _CQV_STRIP: frozenset[str] = frozenset(
 # Hard per-source character cap: a guard against future bloat, not a budget.
 _SOURCE_CAP = 20_000
 
+# Human-readable explanation of each ER checklist flag injected into the
+# context so Review understands the verdict implication without reading docs.
+_ER_FLAG_MEANINGS: dict[str, str] = {
+    "MISSING_RUNTIME_DOCS": (
+        "README does not document expected runtime — a reviewer cannot bound "
+        "the reproduction effort. This is a major-revision issue."
+    ),
+    "MISSING_INTERMEDIATE_DOCS": (
+        "Runtime exceeds the execution budget and no intermediate reproducible "
+        "results are documented for spot-checking. Major revision required."
+    ),
+    "MISSING_README": (
+        "No README found in the supplement. Major revision required."
+    ),
+    "MISSING_REPRODUCED_ARTIFACTS": (
+        "One or more reproduction targets produced no matching output file "
+        "after the run. Each unmatched target is a major or critical finding."
+    ),
+}
+
+# Comparison statuses that need explicit verdict language in the review.
+_COMPARISON_VERDICT: dict[str, str] = {
+    "pass":                 "REPRODUCED",
+    "fail":                 "FAILED — numerical mismatch",
+    "mismatch_flagged":     "UNRESOLVED — visual comparison required",
+    "no_artifact_produced": "NOT PRODUCED — code ran but output is absent",
+    "no_reference":         "UNVERIFIABLE — no reference extracted from PDF",
+    "unverified":           "UNVERIFIED",
+}
+
+
+def _format_er_context(er: dict[str, Any]) -> str:
+    """Render er_output as a structured Review-readable summary.
+
+    Raw JSON of er_output.json is not useful to Review: it contains Docker
+    internals, preflight metadata, and environment details that dilute the
+    signal. This function extracts the verdict-relevant elements:
+      - execution status and mode
+      - checklist flags with plain-English meaning
+      - per-target comparison results as a concise table
+      - produced artifact list (for matching evidence paths)
+    """
+    status = er.get("status", "unknown")
+    mode = er.get("execution_mode", status)
+
+    lines: list[str] = [f"execution_status: {status}  mode: {mode}"]
+
+    # Checklist flags.
+    flags = er.get("checklist_flags") or []
+    if flags:
+        lines.append(f"\nchecklist_flags_raised: {', '.join(flags)}")
+        for flag in flags:
+            meaning = _ER_FLAG_MEANINGS.get(flag, "(see LOGIC.md §6)")
+            lines.append(f"  {flag}: {meaning}")
+    else:
+        lines.append("checklist_flags_raised: none")
+
+    # Docker run summary.
+    run = er.get("run") or {}
+    rc = run.get("returncode")
+    if rc is not None:
+        timed_out = run.get("timed_out", False)
+        run_summary = "timed out" if timed_out else f"exit code {rc}"
+        artifacts = run.get("artifacts") or []
+        lines.append(
+            f"\ndocker_run: {run_summary}; "
+            f"produced {len(artifacts)} new file(s)"
+        )
+        if artifacts:
+            shown = artifacts[:15]
+            suffix = f" (+{len(artifacts) - 15} more)" if len(artifacts) > 15 else ""
+            lines.append(f"  produced_files: {', '.join(shown)}{suffix}")
+
+    # Comparison results — the core evidence for reproduction.
+    comparisons = er.get("comparisons") or []
+    if comparisons:
+        lines.append(f"\ncomparison_results ({len(comparisons)} reproduction targets):")
+        for c in comparisons:
+            tid = c.get("artifact", "?")
+            kind = c.get("kind", "?")
+            raw_status = c.get("status", "?")
+            verdict = _COMPARISON_VERDICT.get(raw_status, raw_status.upper())
+            detail = c.get("detail", "")
+            nvr = c.get("needs_visual_review", False)
+            meta = c.get("metadata") or {}
+            hamming = meta.get("hamming_distance")
+
+            line = f"  target={tid} kind={kind}: {verdict}"
+            if hamming is not None:
+                line += f" (pHash Hamming={hamming})"
+            if detail:
+                line += f"\n    detail: {detail}"
+            if nvr:
+                line += "\n    → visual adjudication required in review narrative"
+            matched = meta.get("matched_file")
+            if matched:
+                line += f"\n    matched_produced_file: {matched}"
+            lines.append(line)
+    else:
+        lines.append("\ncomparison_results: none (ER skipped or no targets)")
+
+    return "\n".join(lines)
+
 
 def _context_blob(kbe: Any, cqv: Any, er: Any) -> str:
     def one(name: str, data: Any, strip: frozenset[str]) -> str:
@@ -204,7 +307,17 @@ def _context_blob(kbe: Any, cqv: Any, er: Any) -> str:
 
     parts = [one("kbe", kbe, _KBE_STRIP), one("cqv", cqv, _CQV_STRIP)]
     if er is not None:
-        parts.append(one("er", er, frozenset()))
+        if isinstance(er, dict) and er.get("status") != "skipped":
+            # Use the structured summary for executed ER runs — raw JSON
+            # dilutes the signal with Docker internals.
+            parts.append(f"er_output:\n{_format_er_context(er)}")
+        else:
+            # Skipped stub: compact JSON is fine.
+            slim = {k: v for k, v in er.items()
+                    if k not in {"preflight", "execution_environment",
+                                 "restore_log", "image"}}
+            serialised = json.dumps(slim, ensure_ascii=False)
+            parts.append(f"er_output:\n{serialised}")
     return "\n\n".join(parts)
 
 
@@ -334,6 +447,38 @@ _CITE_FORMAT_RULES = (
 )
 
 
+_ER_RISK_RULES = """\
+## ER (experimental run) evidence — scoring rules
+
+When er_output is present and not "skipped", apply these rules.
+
+### Checklist flags (each is a minimum MAJOR REVISION unless stronger evidence warrants CRITICAL):
+- MISSING_RUNTIME_DOCS — README omits expected runtime. Authors cannot \
+claim reproducibility without telling reviewers how long reproduction takes.
+- MISSING_INTERMEDIATE_DOCS — Runtime exceeds the review budget AND no \
+checkpoint outputs are documented for independent verification.
+- MISSING_README — Supplement has no README. Baseline major revision.
+- MISSING_REPRODUCED_ARTIFACTS — Run completed but one or more expected \
+output files were not produced. Each missing target warrants a separate issue \
+entry; cite er/er_output.json.
+
+### Per-target comparison statuses:
+- pass: reproduction confirmed within tolerance. Add as positive evidence in \
+the final_review narrative; lower risk_score proportionally.
+- fail: numerical mismatch confirmed. This is a critical or major issue \
+(critical when it is a primary result, major when secondary). Cite the \
+comparison detail from er_output.
+- mismatch_flagged (needs_visual_review=true): pHash distance exceeds the \
+automated threshold; classification requires visual inspection. Add a major \
+issue noting "visual comparison required" and the Hamming distance. Do NOT \
+mark as pass or fail — this is explicitly unresolved.
+- no_artifact_produced: code ran but did not generate this expected output. \
+Major issue — cite the target label and the produced files list.
+- no_reference: KBE could not extract a reference from the PDF for this \
+target. Note as an audit gap; do not penalise the authors.
+"""
+
+
 def _risk_prompt(
     context: str, assessment_status: str, *, evidence_files: str = "",
 ) -> str:
@@ -350,6 +495,7 @@ def _risk_prompt(
         "Synthesise the reproducibility risk-matrix core from the upstream outputs "
         "above. Cite evidence only from those outputs; for anything the upstream "
         "could not verify, leave it out of issues rather than inventing evidence.\n\n"
+        f"{_ER_RISK_RULES}\n"
         'Return ONLY a single JSON object: {"risk_score": <int 0-100, higher means '
         'less reproducible>, "risk_level": "LOW|MEDIUM|HIGH|CRITICAL", "verdict": '
         '"ACCEPT|MINOR REVISION|MAJOR REVISION|REJECT", "issues": {"critical": [], '
@@ -425,7 +571,19 @@ def _checklist_prompt(
         "identifier), not a generic suggestion. Example good: 'Add "
         "`set.seed(42)` at the top of MCMC.R'. Example bad: 'Ensure "
         "reproducibility'.\n"
-        "Never rename, reorder, or omit items.\n"
+        "Never rename, reorder, or omit items.\n\n"
+        "## ER comparison evidence — checklist verdicts\n\n"
+        "When er_output is present with comparison results, use them to set "
+        "verdicts on reproduction-related items:\n"
+        "- comparison status 'pass': PASS for the corresponding reproduction item.\n"
+        "- comparison status 'fail': FAIL — numerical mismatch confirmed.\n"
+        "- comparison status 'mismatch_flagged': UNVERIFIED — automated comparison "
+        "inconclusive; note 'visual comparison required (pHash flagged)'.\n"
+        "- comparison status 'no_artifact_produced': FAIL — expected output not "
+        "produced by the run.\n"
+        "- ER checklist flag MISSING_RUNTIME_DOCS: FAIL on runtime-documentation items.\n"
+        "- ER checklist flag MISSING_REPRODUCED_ARTIFACTS: FAIL on figure/table "
+        "reproduction items for the missing targets.\n\n"
         "Output the filled template as GitHub-flavoured Markdown only. Do NOT "
         "wrap the response in a ```markdown ... ``` fence — the output IS the "
         "checklist, not a code block containing one."
@@ -999,7 +1157,15 @@ def run_review(
     upstream_status = {
         "kbe": _status_entry(kbe, kbe_status),
         "cqv": _status_entry(cqv, cqv_status),
-        "er": {"status": er_status},
+        "er": {
+            "status": er_status,
+            **({"checklist_flags": er.get("checklist_flags")}
+               if isinstance(er, dict) and er.get("checklist_flags")
+               else {}),
+            **({"n_comparisons": len(er.get("comparisons") or [])}
+               if isinstance(er, dict) and er.get("comparisons")
+               else {}),
+        },
     }
     title = kbe.get("paper_title") if isinstance(kbe, dict) else None
     paper_title = title if isinstance(title, str) and title else None
@@ -1012,8 +1178,20 @@ def run_review(
         _write_review(review_dir, rm, _failed_md(rm))
         return rm
 
+    # assessment_status: complete only when KBE+CQV both succeeded and ER (if
+    # it ran) has no unresolved mismatch_flagged or no_artifact_produced findings.
+    er_ran = isinstance(er, dict) and er.get("status") not in (
+        "skipped", "skipped_no_data", "skipped_no_readme",
+        "skipped_no_runtime_docs", "skipped_no_intermediate_docs",
+    )
+    er_partial = er_ran and any(
+        c.get("status") in ("mismatch_flagged", "no_artifact_produced")
+        for c in (er.get("comparisons") or [] if isinstance(er, dict) else [])
+    )
     assessment_status = (
-        "complete" if kbe_status == "success" and cqv_status == "success" else "partial"
+        "complete"
+        if kbe_status == "success" and cqv_status == "success" and not er_partial
+        else "partial"
     )
     context = _context_blob(kbe, cqv, er)
     evidence_files = _available_evidence_files(review_dir, review_title)
