@@ -127,3 +127,38 @@ def test_run_all_returns_one_per_check():
     results = run_stat_judges(evidence, kbe_context="ctx", complete_fn=fake)
     assert len(results) == len(STAT_CHECKS)
     assert {r["item_id"] for r in results} == {c.item_id for c in STAT_CHECKS}
+
+
+# ---------------------------------------------------------------------------
+# MTP rubric regression tests (anti-FP for threshold-based correction)
+# ---------------------------------------------------------------------------
+
+def test_mtp_rubric_mentions_threshold_approach():
+    """Rubric must explicitly accept Delta.* threshold variables as a valid MTP
+    correction so the model cannot anchor solely on p.adjust()."""
+    check = _check("cqv-stat-multiple-testing")
+    assert "threshold" in check.rubric.lower()
+    assert "delta." in check.rubric.lower() or "Delta." in check.rubric
+    assert "p.adjust() is absent" in check.rubric or "p.adjust() absent" in check.rubric
+
+
+def test_mtp_rubric_has_explicit_do_not_fail_guard():
+    """The explicit 'Do NOT fail solely because p.adjust() is absent' guard must
+    be present to prevent the false positive seen in the smoke-test paper."""
+    check = _check("cqv-stat-multiple-testing")
+    assert "do not fail" in check.rubric.lower()
+
+
+def test_mtp_threshold_evidence_reaches_model():
+    """With Delta.Bonf evidence the judge is invoked — not short-circuited as N/A."""
+    evidence = (
+        "Delta.Bonf = alpha / m\n"
+        "Delta.Holm = alpha / (m:1)\n"
+        "Delta.BH   = alpha * (1:m) / m\n"
+        "R.BH = sum(p.sort <= Delta.BH)\n"
+    )
+    fake = _Recorder({"verdict": "pass", "confidence": "high",
+                      "rationale": "threshold-based MTP present"})
+    out = run_stat_judge(_check("cqv-stat-multiple-testing"), evidence, complete_fn=fake)
+    assert fake.calls == 1, "Model must be called when threshold-based evidence is present"
+    assert out["verdict"] == "pass"

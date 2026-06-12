@@ -98,11 +98,25 @@ STAT_CHECKS: tuple[StatCheck, ...] = (
         applies_to=("r", "python"),
         needs_kbe=False,
         rubric=(
-            "If multiple hypothesis tests are run, is an appropriate correction "
-            "applied (R: p.adjust with bonferroni/BH/holm; Python: "
-            "statsmodels.stats.multitest.multipletests) or its absence justified? "
-            "FAIL if many tests are run and raw/minimum p-values are reported or "
-            "selected with no correction and no justification."
+            "If multiple hypothesis tests are run, is an appropriate "
+            "multiple-testing correction applied or its absence justified? "
+            "Accepted correction approaches — any of these is a PASS: "
+            "(1) Library call: R p.adjust() with bonferroni/BH/holm/BY/hochberg; "
+            "Python statsmodels.stats.multitest.multipletests. "
+            "(2) Threshold-based MTP: computing critical-value thresholds derived "
+            "from a named procedure (Bonferroni, Holm, Šidák, BH, BY, DP-MTP) and "
+            "comparing ordered p-values against those thresholds. Variables named "
+            "Delta.Bonf, Delta.Holm, Delta.BH, Delta.Sidak, Delta.BY or similar "
+            "ARE a valid MTP correction — threshold comparison is mathematically "
+            "equivalent to p.adjust(). PASS if such threshold variables are present "
+            "even when p.adjust() is absent. "
+            "(3) Manual or Bayesian MTP: hand-computed adjusted thresholds, "
+            "Gibbs/DP-based MTP sensitivity analysis, or any named MTP procedure "
+            "applied to the full set of test results. "
+            "FAIL only if: (a) many tests are run AND (b) raw p-values are reported "
+            "or used for selection with NO named correction method and NO "
+            "justification. "
+            "Do NOT fail solely because p.adjust() is absent."
         ),
     ),
     StatCheck(
