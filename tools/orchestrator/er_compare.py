@@ -39,14 +39,21 @@ DEFAULT_NUMERIC_RTOL = 0.01
 
 @dataclass
 class ComparisonResult:
-    """Outcome of comparing one reproduced artifact against its reference."""
+    """Outcome of comparing one reproduced artifact against its reference.
+
+    ``needs_visual_review`` is set True when pHash is over threshold (or hashing
+    is unavailable). ER never calls the LLM to adjudicate this — that judgment
+    belongs in Review/Critique, which has the paper context required to decide
+    whether the difference is cosmetic or substantive (LOGIC.md §6).
+    """
 
     artifact: str
     kind: str                       # "figure" | "table" | "plot_data"
-    status: str                     # "pass" | "fail" | "unverified"
-    method: str                     # "phash" | "phash+llm" | "numeric" | "none"
+    status: str                     # "pass" | "mismatch_flagged" | "fail" | "unverified"
+    method: str                     # "phash" | "numeric" | "none"
     detail: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    needs_visual_review: bool = False   # Review/Critique should call LLM vision model
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +63,7 @@ class ComparisonResult:
             "method": self.method,
             "detail": self.detail,
             "metadata": self.metadata,
+            "needs_visual_review": self.needs_visual_review,
         }
 
 
@@ -109,11 +117,15 @@ def compare_figure(
 ) -> ComparisonResult:
     """Compare a reproduced figure against the manuscript reference.
 
-    Stage 1: pHash gate. Below threshold -> pass (no LLM call).
-    Stage 2: if pHash flags a mismatch (or hashing is unavailable) and an
-             ``llm_compare_fn`` is provided, escalate. The callable receives
-             (reproduced_path, reference_path) and returns a dict with keys
-             {classification: "cosmetic"|"substantive", detail: str}.
+    Stage 1 — pHash gate (always run by ER): below threshold → pass.
+    Stage 2 — LLM visual adjudication (called by Review/Critique, not ER):
+      only runs when ``llm_compare_fn`` is provided. ER never passes this;
+      the model needs paper context to decide cosmetic vs substantive, and
+      that context lives in Review (LOGIC.md §6).
+
+    When pHash is over threshold and no LLM is provided, the result is
+    ``status="mismatch_flagged", needs_visual_review=True`` — a signal for
+    Review/Critique to call the LLM with full manuscript context.
     """
     artifact = reproduced.name
 
@@ -125,28 +137,31 @@ def compare_figure(
         if distance <= threshold:
             return ComparisonResult(
                 artifact=artifact, kind="figure", status="pass", method="phash",
-                detail=f"pHash Hamming distance {distance} <= {threshold}.",
+                detail=f"pHash Hamming distance {distance} \u2264 {threshold}.",
                 metadata={"hamming_distance": distance, "threshold": threshold},
             )
-        # Over threshold -> escalate if we can.
-        if llm_compare_fn is None:
-            return ComparisonResult(
-                artifact=artifact, kind="figure", status="unverified", method="phash",
-                detail=(
-                    f"pHash Hamming distance {distance} > {threshold}; no LLM "
-                    "comparator available to adjudicate."
-                ),
-                metadata={"hamming_distance": distance, "threshold": threshold},
-            )
-        return _escalate_figure(artifact, reproduced, reference, distance, llm_compare_fn)
-
-    # Hashing unavailable on one/both sides -> LLM if possible, else unverified.
-    if llm_compare_fn is None:
+        # Over threshold — escalate to LLM only if a comparator is provided
+        # (i.e. called from Review/Critique, not ER).
+        if llm_compare_fn is not None:
+            return _escalate_figure(artifact, reproduced, reference, distance, llm_compare_fn)
         return ComparisonResult(
-            artifact=artifact, kind="figure", status="unverified", method="none",
-            detail="Perceptual hashing unavailable (Pillow missing or unreadable image).",
+            artifact=artifact, kind="figure", status="mismatch_flagged", method="phash",
+            detail=(
+                f"pHash Hamming distance {distance} > {threshold}; "
+                "flagged for visual review."
+            ),
+            metadata={"hamming_distance": distance, "threshold": threshold},
+            needs_visual_review=True,
         )
-    return _escalate_figure(artifact, reproduced, reference, None, llm_compare_fn)
+
+    # Hashing unavailable on one/both sides (Pillow absent or unreadable image).
+    if llm_compare_fn is not None:
+        return _escalate_figure(artifact, reproduced, reference, None, llm_compare_fn)
+    return ComparisonResult(
+        artifact=artifact, kind="figure", status="mismatch_flagged", method="none",
+        detail="Perceptual hashing unavailable; flagged for visual review.",
+        needs_visual_review=True,
+    )
 
 
 def _escalate_figure(

@@ -126,14 +126,15 @@ def test_figure_identical_passes_via_phash(tmp_path):
     assert r.method == "phash"
 
 
-def test_figure_phash_unavailable_without_llm_is_unverified(tmp_path):
-    # Non-image files -> _phash returns None -> unverified when no LLM.
+def test_figure_phash_unavailable_without_llm_is_mismatch_flagged(tmp_path):
+    # Non-image files -> _phash returns None -> mismatch_flagged + needs_visual_review.
     a = tmp_path / "a.png"
     b = tmp_path / "b.png"
     a.write_text("not an image")
     b.write_text("not an image")
     r = compare_figure(a, b)
-    assert r.status == "unverified"
+    assert r.status == "mismatch_flagged"
+    assert r.needs_visual_review is True
 
 
 def test_figure_escalates_to_llm_when_phash_unavailable(tmp_path):
@@ -167,3 +168,13 @@ def test_comparison_result_to_dict_roundtrip():
     r = ComparisonResult(artifact="f.png", kind="figure", status="pass", method="phash")
     d = r.to_dict()
     assert d["artifact"] == "f.png" and d["status"] == "pass"
+    assert d["needs_visual_review"] is False
+
+
+def test_comparison_result_mismatch_flagged_sets_needs_visual_review():
+    r = ComparisonResult(
+        artifact="f.png", kind="figure",
+        status="mismatch_flagged", method="phash",
+        needs_visual_review=True,
+    )
+    assert r.to_dict()["needs_visual_review"] is True

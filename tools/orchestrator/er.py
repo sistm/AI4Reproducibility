@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.orchestrator._stage import append_log, now_iso
+from tools.orchestrator.er_artifacts import new_files_since, pair_and_compare, snapshot_files
 from tools.orchestrator.er_compare import ComparisonResult
 from tools.orchestrator.er_docker import (
     RunFn,
@@ -109,6 +110,20 @@ def _entry_command(review_dir: Path) -> list[str]:
     except (OSError, ValueError):
         pass
     return ["Rscript", "main.R"]
+
+
+def _load_targets(review_dir: Path) -> list[dict[str, Any]]:
+    """Read reproduction_targets from kbe_output.json. Returns [] on any failure."""
+    try:
+        kbe = json.loads((review_dir / "kbe" / "kbe_output.json").read_text(encoding="utf-8"))
+        targets = kbe.get("reproduction_targets")
+        return targets if isinstance(targets, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _kbe_dir(review_dir: Path) -> Path:
+    return review_dir / "kbe"
 
 
 def _skip_output(
@@ -216,6 +231,9 @@ def run_er(
     image = image_for_r_version(env.get("r_version"))
     entry = _entry_command(review_dir)
 
+    # Snapshot workspace before execution so we know exactly what was produced.
+    before_snapshot = snapshot_files(assets_dir)
+
     restore, run = restore_and_run(
         assets_dir, image, entry,
         run_timeout=budget_seconds,
@@ -239,6 +257,9 @@ def run_er(
         _write(review_dir, output)
         return output
 
+    # Collect produced artifacts (files that did not exist before the run).
+    produced = new_files_since(assets_dir, before_snapshot)
+
     run_ok = run is not None and run.ok
     output: dict[str, Any] = {
         "status": "success" if run_ok else "failed",
@@ -255,14 +276,31 @@ def run_er(
             "timed_out": run.timed_out if run else None,
             "stdout_tail": _tail(run.stdout) if run else "",
             "stderr_tail": _tail(run.stderr) if run else "",
-            "artifacts": run.artifacts if run else [],
+            "artifacts": [str(p.relative_to(assets_dir)) for p in produced],
         },
-        "comparisons": [],  # populated by the comparison step when references exist
+        "comparisons": [],
     }
     if not run_ok and run is not None and run.timed_out:
         output["failure_mode"] = "execution_timeout"
     elif not run_ok:
         output["failure_mode"] = "execution_error"
+
+    # Pair targets against produced artifacts and run deterministic comparisons.
+    # This runs even when the execution failed — partial output is still evidence.
+    targets = _load_targets(review_dir)
+    if targets:
+        comparison_results = pair_and_compare(
+            targets, produced, _kbe_dir(review_dir),
+        )
+        output["comparisons"] = [r.to_dict() for r in comparison_results]
+        # Surface a checklist flag when any target produced nothing.
+        missing = [r.artifact for r in comparison_results
+                   if r.status == "no_artifact_produced"]
+        if missing:
+            output["checklist_flags"] = [
+                *(output.get("checklist_flags") or []),
+                "MISSING_REPRODUCED_ARTIFACTS",
+            ]
 
     _write(review_dir, output)
     return output
