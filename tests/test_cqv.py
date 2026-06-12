@@ -284,6 +284,64 @@ def test_run_cqv_with_string_shape_evidence_is_coerced_and_passes(tmp_path):
     assert blocker["evidence"][0] == {"file": "main.R", "line": 12}
 
 
+# --- severity coercion (patch 0089) -------------------------------------------
+
+
+def test_normalise_coerces_p0_to_critical(tmp_path):
+    """P0 priority label → CRITICAL severity; schema validation must not raise."""
+    _seed_assets(tmp_path, "p0-sev")
+    audit = json.dumps({
+        "status": "partial",
+        "reproducibility_blockers": [{
+            "id": "x",
+            "severity": "P0",        # model slip
+            "description": "crash",
+            "evidence": [{"file": "main.R", "line": 1}],
+        }],
+    })
+    out = run_cqv("p0-sev", root=tmp_path, complete_fn=_fake_returning(audit))
+    blocker = next(b for b in out["reproducibility_blockers"] if b.get("id") == "x")
+    assert blocker["severity"] == "CRITICAL"
+
+
+def test_normalise_coerces_p1_p2_p3(tmp_path):
+    """P1→HIGH, P2→MEDIUM, P3→LOW coercions all pass schema validation."""
+    from tools.orchestrator.cqv import _SEVERITY_COERCE
+    assert _SEVERITY_COERCE["P1"] == "HIGH"
+    assert _SEVERITY_COERCE["P2"] == "MEDIUM"
+    assert _SEVERITY_COERCE["P3"] == "LOW"
+
+
+def test_normalise_coerces_lowercase_severity(tmp_path):
+    """Lowercase 'high' must be uppercased to pass schema."""
+    _seed_assets(tmp_path, "lower-sev")
+    audit = json.dumps({
+        "status": "partial",
+        "reproducibility_blockers": [{
+            "id": "y",
+            "severity": "high",      # lowercase slip
+            "description": "issue",
+            "evidence": [{"file": "main.R", "line": 1}],
+        }],
+    })
+    out = run_cqv("lower-sev", root=tmp_path, complete_fn=_fake_returning(audit))
+    blocker = next(b for b in out["reproducibility_blockers"] if b.get("id") == "y")
+    assert blocker["severity"] == "HIGH"
+
+
+def test_assert_output_schema_rejects_bad_severity_directly():
+    """Schema still rejects an uncorrected bad label — coercion is the guard."""
+    from tools.orchestrator.cqv import _assert_output_schema
+    obj = {
+        "paper_id": "t", "status": "partial", "audit_timestamp": "2026-01-01T00:00:00Z",
+        "reproducibility_blockers": [{
+            "id": "z", "severity": "P0", "description": "x", "evidence": [],
+        }],
+    }
+    with pytest.raises((ValueError, Exception)):
+        _assert_output_schema(obj)
+
+
 # --- patch 0066: doubled-key stutter pre-pass in CQV --------------------------
 
 
@@ -764,3 +822,181 @@ def test_er_reads_execution_environment_from_cqv(tmp_path):
     # ER should have used r_version from cqv_output.json.
     assert out["image"].endswith(":r4.3.2")
     assert out["execution_environment"]["r_version"] == "4.3.2"
+
+
+# --- defensive blocker coercion (patch 0090) ---------------------------------
+# Systematic anti-regression: every way the model can slip against the schema,
+# locked in as a unit test. _coerce_blocker is the single point of defense;
+# adding a new slip pattern means adding a row here.
+
+
+def test_coerce_blocker_description_alias_style(tmp_path):
+    """'style' key (observed in real BJ smoke run) must be recovered as
+    description, not fail schema validation."""
+    _seed_assets(tmp_path, "alias-style")
+    audit = json.dumps({
+        "status": "partial",
+        "reproducibility_blockers": [{
+            "id": "bj-13-no-tests",
+            "severity": "MEDIUM",
+            "style": "No test directory or test files found.",
+            "evidence": [],
+        }],
+    })
+    out = run_cqv("alias-style", root=tmp_path, complete_fn=_fake_returning(audit))
+    blocker = next(b for b in out["reproducibility_blockers"] if b.get("id") == "bj-13-no-tests")
+    assert blocker["description"] == "No test directory or test files found."
+    assert "style" not in blocker  # alias removed; canonical key used
+
+
+def test_coerce_blocker_empty_evidence_array_dropped(tmp_path):
+    """Empty evidence list (the new slip from real smoke run) must be dropped
+    entirely rather than fail schema's minItems: 1 — the field is optional."""
+    _seed_assets(tmp_path, "empty-ev")
+    audit = json.dumps({
+        "status": "partial",
+        "reproducibility_blockers": [{
+            "id": "bj-13",
+            "severity": "MEDIUM",
+            "description": "missing tests",
+            "evidence": [],
+        }],
+    })
+    out = run_cqv("empty-ev", root=tmp_path, complete_fn=_fake_returning(audit))
+    blocker = next(b for b in out["reproducibility_blockers"] if b.get("id") == "bj-13")
+    assert "evidence" not in blocker
+
+
+def test_coerce_blocker_multiple_description_aliases():
+    """All declared description aliases work; first non-empty wins per the
+    _DESCRIPTION_ALIASES order."""
+    from tools.orchestrator.cqv import _coerce_blocker
+    for alias in ("style", "concern", "issue", "note", "title", "summary",
+                  "problem", "message", "text"):
+        b = {"id": "x", "severity": "HIGH", alias: f"via {alias}"}
+        fixed = _coerce_blocker(b)
+        assert fixed is not None
+        assert fixed["description"] == f"via {alias}"
+
+
+def test_coerce_blocker_synthesises_description_from_id():
+    """If every alias is missing or empty, synthesise a description so the
+    blocker survives rather than the whole CQV stage crashing."""
+    from tools.orchestrator.cqv import _coerce_blocker
+    fixed = _coerce_blocker({"id": "bj-99", "severity": "HIGH"})
+    assert fixed is not None
+    assert "bj-99" in fixed["description"]
+
+
+def test_coerce_blocker_missing_severity_defaults_to_high():
+    from tools.orchestrator.cqv import _coerce_blocker
+    fixed = _coerce_blocker({"id": "x", "description": "no severity"})
+    assert fixed is not None
+    assert fixed["severity"] == "HIGH"
+
+
+def test_coerce_blocker_empty_id_dropped():
+    """Empty string id violates schema minLength 1 *when present*; the field
+    is optional, so drop it rather than rejecting the blocker."""
+    from tools.orchestrator.cqv import _coerce_blocker
+    fixed = _coerce_blocker({
+        "id": "", "severity": "HIGH", "description": "x"
+    })
+    assert fixed is not None
+    assert "id" not in fixed
+
+
+def test_coerce_blocker_malformed_evidence_items_dropped():
+    """Evidence items missing file or line are dropped; surviving items kept."""
+    from tools.orchestrator.cqv import _coerce_blocker
+    fixed = _coerce_blocker({
+        "id": "x", "severity": "HIGH", "description": "ok",
+        "evidence": [
+            {"file": "main.R", "line": 12},      # valid
+            {"file": "", "line": 1},              # empty file -> drop
+            {"file": "ok.R"},                     # missing line -> coerced 0 (valid)
+            {"line": 5},                          # missing file -> drop
+            {"file": "a.R", "line": "44"},        # string line -> coerce to int
+        ],
+    })
+    assert fixed is not None
+    files = [e["file"] for e in fixed["evidence"]]
+    assert "main.R" in files
+    assert "ok.R" in files
+    assert "a.R" in files
+    # the dropped entries
+    assert "" not in files
+    # string line coerced
+    a_entry = next(e for e in fixed["evidence"] if e["file"] == "a.R")
+    assert a_entry["line"] == 44
+
+
+def test_coerce_blocker_all_evidence_malformed_field_dropped():
+    """If every evidence item is dropped, the field is removed entirely."""
+    from tools.orchestrator.cqv import _coerce_blocker
+    fixed = _coerce_blocker({
+        "id": "x", "severity": "HIGH", "description": "ok",
+        "evidence": [{"file": ""}, {"line": 1}],  # both invalid
+    })
+    assert fixed is not None
+    assert "evidence" not in fixed
+
+
+def test_coerce_blocker_non_dict_returns_none():
+    from tools.orchestrator.cqv import _coerce_blocker
+    assert _coerce_blocker("a string") is None
+    assert _coerce_blocker(None) is None
+    assert _coerce_blocker(["a", "list"]) is None
+
+
+def test_coerce_blocker_preserves_unknown_fields():
+    """Passthrough: unknown keys the model emits (e.g. 'recommended_fix') are
+    preserved — only alias keys are consumed."""
+    from tools.orchestrator.cqv import _coerce_blocker
+    fixed = _coerce_blocker({
+        "id": "x", "severity": "HIGH", "description": "ok",
+        "recommended_fix": "add set.seed(42)",
+        "tags": ["seed", "rng"],
+    })
+    assert fixed is not None
+    assert fixed["recommended_fix"] == "add set.seed(42)"
+    assert fixed["tags"] == ["seed", "rng"]
+
+
+def test_run_cqv_recovers_from_combined_slips(tmp_path):
+    """Smoke-style: a blocker hitting THREE slip patterns at once (P0 severity,
+    'style' alias, empty evidence) still survives normalisation cleanly."""
+    _seed_assets(tmp_path, "combined-slips")
+    audit = json.dumps({
+        "status": "partial",
+        "reproducibility_blockers": [{
+            "id": "bj-x",
+            "severity": "P0",                              # slip 1
+            "style": "Multiple things wrong here.",         # slip 2 (alias)
+            "evidence": [],                                 # slip 3 (empty)
+        }],
+    })
+    out = run_cqv("combined-slips", root=tmp_path, complete_fn=_fake_returning(audit))
+    blocker = next(b for b in out["reproducibility_blockers"] if b.get("id") == "bj-x")
+    assert blocker["severity"] == "CRITICAL"
+    assert blocker["description"] == "Multiple things wrong here."
+    assert "evidence" not in blocker
+    assert "style" not in blocker
+
+
+def test_run_cqv_drops_non_dict_blockers(tmp_path):
+    """A non-dict entry (model emits a bare string by mistake) doesn't crash
+    the stage — it's dropped, valid entries survive."""
+    _seed_assets(tmp_path, "mixed-types")
+    audit = json.dumps({
+        "status": "partial",
+        "reproducibility_blockers": [
+            "rogue string",  # non-dict, dropped
+            {"id": "good", "severity": "HIGH", "description": "real",
+             "evidence": [{"file": "main.R", "line": 1}]},
+        ],
+    })
+    out = run_cqv("mixed-types", root=tmp_path, complete_fn=_fake_returning(audit))
+    ids = [b.get("id") for b in out["reproducibility_blockers"]]
+    assert "good" in ids
+    assert len(out["reproducibility_blockers"]) == 1

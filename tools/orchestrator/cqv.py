@@ -57,6 +57,24 @@ CQV_TOOLS = [
 
 _ALLOWED_STATUS = {"success", "partial", "failed"}
 
+# Model sometimes emits priority-style labels (P0/P1/P2/P3) or lowercase
+# variants instead of the schema enum.  Coerce before schema validation.
+_ALLOWED_SEVERITY = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+_SEVERITY_COERCE: dict[str, str] = {
+    "P0": "CRITICAL", "P1": "HIGH", "P2": "MEDIUM", "P3": "LOW", "P4": "LOW",
+    "BLOCKER": "CRITICAL", "MAJOR": "HIGH", "MINOR": "LOW", "TRIVIAL": "LOW",
+}
+
+# Keys the model uses in place of the required ``description`` field. Tried in
+# order; first non-empty wins. Observed in real smoke-test runs: ``style``
+# (BJ paper, smoke 2026-06-12). The rest are defensive — alternatives the
+# model is plausibly drawn to when describing the *kind* of issue.
+_DESCRIPTION_ALIASES: tuple[str, ...] = (
+    "description", "style", "concern", "issue", "note", "title",
+    "summary", "problem", "message", "text", "detail", "details",
+    "rationale", "explanation",
+)
+
 _MAX_EVIDENCE_ITEMS_IN_PROMPT = 5
 
 
@@ -291,6 +309,110 @@ def _coerce_evidence(ev: Any) -> Any:
             # silently skip other types — we don't fabricate structure
         return out
     return ev
+
+
+def _coerce_evidence_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Coerce one evidence entry to the schema's ``{file, line}`` shape, or
+    return None if unsalvageable.
+
+    Slips handled: missing/empty ``file`` (drop entry), ``line`` as string
+    (parse to int), negative or non-integer ``line`` (drop entry).
+    """
+    file_val = item.get("file")
+    if not isinstance(file_val, str) or not file_val.strip():
+        return None
+    line_val = item.get("line", 0)
+    if isinstance(line_val, str):
+        try:
+            line_val = int(line_val.strip())
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(line_val, int) or line_val < 0:
+        return None
+    out = {"file": file_val, "line": line_val}
+    if isinstance(item.get("snippet"), str):
+        out["snippet"] = item["snippet"]
+    if isinstance(item.get("note"), str):
+        out["note"] = item["note"]
+    return out
+
+
+def _coerce_blocker(blocker: Any) -> dict[str, Any] | None:
+    """Coerce one blocker to the schema's required shape, or return None if
+    unsalvageable (non-dict, or no description recoverable from any alias).
+
+    Centralises every defensive fix the model needs. Without this, ``_normalise``
+    must encode each slip pattern inline and the orchestrator crashes at the
+    schema check every time the model invents a new key. Handled patterns:
+
+    * ``severity`` — P0..P3, lowercase, missing, junk → coerce via
+      ``_SEVERITY_COERCE``, fall back to HIGH.
+    * ``description`` — try ``_DESCRIPTION_ALIASES`` in order; if none yields
+      a non-empty string, synthesise from ``id`` or return a placeholder so
+      downstream consumers see an entry rather than a silent drop.
+    * ``id`` — drop the field if empty/whitespace (schema requires minLength
+      1 *when present*; field is optional).
+    * ``evidence`` — coerce each item via ``_coerce_evidence_item``, drop
+      malformed items; if the result is empty, drop the field entirely
+      (optional in schema, just must be non-empty when present).
+    """
+    if not isinstance(blocker, dict):
+        return None
+
+    fixed: dict[str, Any] = {}
+
+    # id — drop if empty
+    raw_id = blocker.get("id")
+    if isinstance(raw_id, str) and raw_id.strip():
+        fixed["id"] = raw_id.strip()
+
+    # severity — coerce P-labels and case
+    raw_sev = str(blocker.get("severity", "")).strip().upper()
+    fixed["severity"] = (
+        raw_sev if raw_sev in _ALLOWED_SEVERITY
+        else _SEVERITY_COERCE.get(raw_sev, "HIGH")
+    )
+
+    # description — walk aliases
+    description: str | None = None
+    for key in _DESCRIPTION_ALIASES:
+        val = blocker.get(key)
+        if isinstance(val, str) and val.strip():
+            description = val.strip()
+            break
+    if description is None:
+        # Synthesise from id so the entry survives rather than crashing the
+        # whole CQV stage on one malformed blocker.
+        description = (
+            f"Blocker emitted without description (id: {fixed['id']})"
+            if "id" in fixed
+            else "Blocker emitted without description or recoverable alias."
+        )
+    fixed["description"] = description
+
+    # evidence — coerce shape, drop malformed items, drop field if empty.
+    if "evidence" in blocker:
+        coerced_list = _coerce_evidence(blocker["evidence"])
+        if isinstance(coerced_list, list):
+            cleaned: list[dict[str, Any]] = []
+            for item in coerced_list:
+                if isinstance(item, dict):
+                    item = _coerce_evidence_item(item)
+                    if item is not None:
+                        cleaned.append(item)
+            if cleaned:
+                fixed["evidence"] = cleaned
+            # else: drop the field entirely — it's optional in the schema.
+
+    # Preserve any other fields the model emitted (passthrough), but never
+    # let them overwrite the canonical ones we just set or revive ones we
+    # deliberately dropped (e.g. empty ``id``).
+    _consumed = {"id", "severity", "evidence", *_DESCRIPTION_ALIASES}
+    for key, val in blocker.items():
+        if key not in fixed and key not in _consumed:
+            fixed[key] = val
+
+    return fixed
 
 
 def _default_blocker(reason: str | None) -> dict[str, Any]:
@@ -528,13 +650,17 @@ def _normalise(obj: dict[str, Any], review_title: str) -> dict[str, Any]:
 
     blockers = obj.get("reproducibility_blockers")
     blockers = blockers if isinstance(blockers, list) else []
-    # Patch 0054: defensively coerce any string-shaped evidence to the
-    # canonical object-list shape. Catches model-emitted blockers that use
-    # the legacy string form even though both internal emitters
-    # (_stat_blocker, _default_blocker) now produce object-lists.
+    # Patch 0090: route every blocker through _coerce_blocker, which handles
+    # the full set of model slip patterns against the schema (severity P0..P3,
+    # description-key aliases like 'style', empty evidence arrays, malformed
+    # evidence items, empty ids). Unsalvageable entries — non-dicts only — are
+    # dropped silently rather than crashing the whole CQV stage.
+    coerced_blockers: list[dict[str, Any]] = []
     for blocker in blockers:
-        if isinstance(blocker, dict) and "evidence" in blocker:
-            blocker["evidence"] = _coerce_evidence(blocker["evidence"])
+        fixed = _coerce_blocker(blocker)
+        if fixed is not None:
+            coerced_blockers.append(fixed)
+    blockers = coerced_blockers
     # Collapse duplicated blockers (the model tends to restate the same id both
     # nested in repository_audit and at the top level): keep first per id.
     seen: set[str] = set()
