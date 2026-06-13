@@ -1,16 +1,23 @@
 """
-Stubs for static checks not yet implemented.
+Stubs for static checks that genuinely require a language parser.
 
-Each stub returns a valid ``CheckResult`` with ``status="not_implemented"``
-so the CQV agent can still emit a well-formed ``cqv_output.json`` and the
-Review agent can mark the corresponding checklist item as **Unverified**.
+Each returns a valid ``CheckResult`` with ``status="not_implemented"`` so the
+CQV agent emits a well-formed ``cqv_output.json`` and Review marks the item
+Unverified.
 
-When you implement one of these, move the function to the appropriate
-module and update the registry in ``dispatch.py``.
+When implementing, move the function to the appropriate module and update
+``dispatch.py``.
 
-Implemented and removed from here (patch 0071): check_set_seed_scope,
+Implemented and removed (patch 0071): check_set_seed_scope,
 check_imports_complete, check_function_docs_present, check_no_unbounded_loops,
-check_global_state_mutation → now in r_heuristics.py.
+check_global_state_mutation → r_heuristics.py.
+
+Implemented and removed (patch 0092): check_parse_success,
+check_duplicate_code_blocks, check_growing_vectors,
+check_error_handling_coverage → heuristics_cross_lang.py.
+
+Remaining four require a symbol table or CFG; preferred path is tree-sitter-r
+(Python bindings, no R install required).
 """
 
 from __future__ import annotations
@@ -30,44 +37,29 @@ def _stub(tool_id: str, reason: str) -> CheckResult:
     )
 
 
-# Each of these needs a language parser (Python ast is easy;
-# R needs tree-sitter or shelling out to Rscript). Deferred to Phase 3.
-
-def check_parse_success(repo_path: Path, **_: object) -> CheckResult:
-    return _stub("check_parse_success",
-                 "Requires language-specific parser invocation.")
-
-
 def check_undefined_references(repo_path: Path, **_: object) -> CheckResult:
-    return _stub("check_undefined_references",
-                 "Requires symbol-table construction per language.")
+    return _stub(
+        "check_undefined_references",
+        "Requires symbol-table construction (tree-sitter-r for R, ast for Python).",
+    )
 
 
 def check_function_signatures(repo_path: Path, **_: object) -> CheckResult:
-    return _stub("check_function_signatures",
-                 "Requires per-package signature DB or live import.")
-
-
-def check_duplicate_code_blocks(repo_path: Path, **_: object) -> CheckResult:
-    return _stub("check_duplicate_code_blocks",
-                 "Requires token-level duplicate detection (e.g. CPD).")
+    return _stub(
+        "check_function_signatures",
+        "Requires per-package signature DB or live import resolution.",
+    )
 
 
 def check_dead_code(repo_path: Path, **_: object) -> CheckResult:
-    return _stub("check_dead_code",
-                 "Requires control-flow graph construction.")
-
-
-def check_growing_vectors(repo_path: Path, **_: object) -> CheckResult:
-    return _stub("check_growing_vectors",
-                 "Requires loop-body AST analysis.")
+    return _stub(
+        "check_dead_code",
+        "Requires control-flow graph construction.",
+    )
 
 
 def check_loop_invariants(repo_path: Path, **_: object) -> CheckResult:
-    return _stub("check_loop_invariants",
-                 "Requires data-flow analysis.")
-
-
-def check_error_handling_coverage(repo_path: Path, **_: object) -> CheckResult:
-    return _stub("check_error_handling_coverage",
-                 "Requires AST + a registry of 'risky' operations.")
+    return _stub(
+        "check_loop_invariants",
+        "Requires data-flow analysis across loop iterations.",
+    )

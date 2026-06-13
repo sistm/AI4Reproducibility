@@ -53,7 +53,8 @@ def test_list_static_checks_reports_implementation_status():
     assert "check_absolute_paths" in info
     assert info["check_absolute_paths"]["implemented"] is True
     assert info["check_set_seed_scope"]["implemented"] is True   # patch 0071
-    assert info["check_parse_success"]["implemented"] is False   # still stubbed
+    assert info["check_parse_success"]["implemented"] is True    # patch 0092
+    assert info["check_loop_invariants"]["implemented"] is False  # still stubbed
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +88,11 @@ CLEAN_EXPECTED_PASS = [
     "check_function_docs_present",
     "check_no_unbounded_loops",
     "check_global_state_mutation",
+    # patch 0092 — cross-language heuristics
+    "check_parse_success",
+    "check_duplicate_code_blocks",
+    "check_growing_vectors",
+    "check_error_handling_coverage",
 ]
 
 
@@ -141,14 +147,10 @@ def test_dirty_repo_fails(tool_id: str, expected_statuses: tuple[str, ...]):
 # ---------------------------------------------------------------------------
 
 STUBBED_CHECKS = [
-    "check_parse_success",
     "check_undefined_references",
     "check_function_signatures",
-    "check_duplicate_code_blocks",
     "check_dead_code",
-    "check_growing_vectors",
     "check_loop_invariants",
-    "check_error_handling_coverage",
 ]
 
 
@@ -368,3 +370,143 @@ def test_check_result_to_dict_has_required_keys():
     assert d["tool_id"] == "check_absolute_paths"
     assert d["status"] == "pass"
     assert d["evidence"] == [{"file": "a.R", "line": 1}]
+
+
+# ---------------------------------------------------------------------------
+# patch 0092 — heuristics_cross_lang: ~3 tests per check
+# ---------------------------------------------------------------------------
+
+# check_parse_success --------------------------------------------------------
+
+def test_parse_success_pass_valid_python(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1 + 1\n")
+    assert run_static_check("check_parse_success", tmp_path)["status"] == "pass"
+
+
+def test_parse_success_fail_python_syntax_error(tmp_path):
+    (tmp_path / "a.py").write_text("def foo(\n  x\n  # unclosed\n")
+    r = run_static_check("check_parse_success", tmp_path)
+    assert r["status"] == "fail"
+
+
+def test_parse_success_fail_r_unclosed_brace(tmp_path):
+    (tmp_path / "a.R").write_text("foo <- function(x) {\n  x + 1\n# missing closing brace\n")
+    r = run_static_check("check_parse_success", tmp_path)
+    assert r["status"] == "fail"
+
+
+def test_parse_success_fail_r_negative_depth(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1\n}\n")  # extra closing brace
+    r = run_static_check("check_parse_success", tmp_path)
+    assert r["status"] == "fail"
+
+
+def test_parse_success_pass_empty_repo(tmp_path):
+    assert run_static_check("check_parse_success", tmp_path)["status"] == "pass"
+
+
+# check_duplicate_code_blocks ------------------------------------------------
+
+def test_duplicate_blocks_pass_no_duplicates(tmp_path):
+    (tmp_path / "a.R").write_text("\n".join(
+        [f"line_{i} <- i * {i} + some_value" for i in range(20)]
+    ))
+    assert run_static_check("check_duplicate_code_blocks", tmp_path)["status"] == "pass"
+
+
+def test_duplicate_blocks_fail_copied_block(tmp_path):
+    block = "\n".join(
+        [f"result_{i} <- compute_thing(x_{i}, param_{i})" for i in range(6)]
+    )
+    filler = "\n".join([f"x_{i} <- {i}" for i in range(20)])  # 20-line gap satisfies _MIN_SEPARATION
+    (tmp_path / "a.R").write_text(block + "\n\n" + filler + "\n\n" + block + "\n")
+    r = run_static_check("check_duplicate_code_blocks", tmp_path)
+    assert r["status"] == "fail"
+
+
+def test_duplicate_blocks_fail_across_files(tmp_path):
+    block = "\n".join(
+        [f"process_item_{i} <- function(x_{i}) x_{i} * weight_{i}" for i in range(6)]
+    )
+    (tmp_path / "a.R").write_text(block + "\n")
+    (tmp_path / "b.R").write_text(block + "\n")
+    r = run_static_check("check_duplicate_code_blocks", tmp_path)
+    assert r["status"] == "fail"
+
+
+# check_growing_vectors ------------------------------------------------------
+
+def test_growing_vectors_pass_no_loop_growth(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "results <- vector('list', 100)\n"
+        "for (i in seq_along(items)) { results[[i]] <- process(items[[i]]) }\n"
+    )
+    assert run_static_check("check_growing_vectors", tmp_path)["status"] == "pass"
+
+
+def test_growing_vectors_fail_c_in_loop(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "out <- c()\n"
+        "for (i in 1:100) {\n"
+        "  out <- c(out, compute(i))\n"
+        "}\n"
+    )
+    r = run_static_check("check_growing_vectors", tmp_path)
+    assert r["status"] == "fail"
+    assert r["evidence"][0]["line"] == 3
+
+
+def test_growing_vectors_fail_append_in_while(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "results <- list()\n"
+        "while (condition) {\n"
+        "  results <- append(results, new_item)\n"
+        "}\n"
+    )
+    r = run_static_check("check_growing_vectors", tmp_path)
+    assert r["status"] == "fail"
+
+
+def test_growing_vectors_pass_no_r_files(tmp_path):
+    (tmp_path / "a.py").write_text("x = []\nfor i in range(10):\n    x.append(i)\n")
+    assert run_static_check("check_growing_vectors", tmp_path)["status"] == "pass"
+
+
+# check_error_handling_coverage ----------------------------------------------
+
+def test_error_handling_pass_trycatch_present(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "result <- tryCatch(\n"
+        "  download.file(url, dest),\n"
+        "  error = function(e) NULL\n"
+        ")\n"
+    )
+    assert run_static_check("check_error_handling_coverage", tmp_path)["status"] == "pass"
+
+
+def test_error_handling_fail_network_without_handler(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "download.file('https://example.com/data.csv', 'data.csv')\n"
+        "dat <- read.csv('data.csv')\n"
+    )
+    r = run_static_check("check_error_handling_coverage", tmp_path)
+    assert r["status"] == "fail"
+    assert r["evidence"][0]["line"] == 1
+
+
+def test_error_handling_pass_no_network_calls(tmp_path):
+    (tmp_path / "a.R").write_text(
+        "dat <- read.csv('local_data.csv')\n"
+        "result <- lm(y ~ x, data = dat)\n"
+    )
+    assert run_static_check("check_error_handling_coverage", tmp_path)["status"] == "pass"
+
+
+def test_error_handling_fail_python_requests_no_try(tmp_path):
+    (tmp_path / "a.py").write_text(
+        "import requests\n"
+        "r = requests.get('https://api.example.com/data')\n"
+        "data = r.json()\n"
+    )
+    r = run_static_check("check_error_handling_coverage", tmp_path)
+    assert r["status"] == "fail"

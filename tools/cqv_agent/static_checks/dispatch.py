@@ -22,12 +22,8 @@ from ._common import CheckResult
 # Stubs (AST-requiring; deferred to Phase 3 / tree-sitter-r)
 from ._stubs import (
     check_dead_code,
-    check_duplicate_code_blocks,
-    check_error_handling_coverage,
     check_function_signatures,
-    check_growing_vectors,
     check_loop_invariants,
-    check_parse_success,
     check_undefined_references,
 )
 from .danger_patterns import (
@@ -53,6 +49,14 @@ from .file_inventory import (
     check_sessioninfo_block,
     check_test_directory_present,
     check_version_pinning,
+)
+
+# Cross-language heuristics implementable without tree-sitter (patch 0092)
+from .heuristics_cross_lang import (
+    check_duplicate_code_blocks,
+    check_error_handling_coverage,
+    check_growing_vectors,
+    check_parse_success,
 )
 from .path_checks import (
     check_absolute_paths,
