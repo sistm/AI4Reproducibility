@@ -516,30 +516,79 @@ def _failure_output(
     }
 
 
-_MAX_SNIPPET_CHARS = 300
+_MAX_SNIPPET_CHARS = 200   # per-line cap inside a context block (tighter than before)
+_CONTEXT_LINES = 5         # lines of context above and below the cited line
 
 
-def _read_source_line(assets_dir: Path, file_ref: str, line_no: int) -> str | None:
-    """Return the verbatim source line at ``file_ref:line_no``, or None.
+def _read_source_context(
+    assets_dir: Path,
+    file_ref: str,
+    line_no: int,
+    *,
+    context: int = _CONTEXT_LINES,
+) -> str | None:
+    """Return a ±``context``-line window around ``line_no`` in ``file_ref``.
 
-    The exact line is read from disk and later escaped by ``json.dumps`` — never
-    hand-escaped by the model — so precise code quotes reach the review without
-    the model being able to break its own JSON. Path-traversal-safe; never raises.
+    Each line is prefixed with its 1-indexed line number; the cited line is
+    marked with ``>>`` so the model can unambiguously identify the target.
+    Returns None when the file doesn't exist or path-traversal is detected.
+
+    Replaces the old single-line ``_read_source_line`` (patch 0094). The richer
+    context lets the model understand *why* a line is problematic — e.g. seeing
+    that a ``setwd()`` call is inside a sourced helper, or that an RNG call
+    precedes ``set.seed`` — without requiring it to call ``read_file`` itself.
+
+    Format example (line 10 cited, context=2)::
+
+        L8 :   set.seed(123)
+        L9 :   results <- c()
+        L10>>  for (i in 1:1000) {
+        L11:     results <- c(results, compute(i))
+        L12:   }
     """
     try:
         base = assets_dir.resolve()
         target = (assets_dir / file_ref).resolve()
         if base != target and base not in target.parents:
-            return None  # ref escaped the assets directory
+            return None
         if not target.is_file():
             return None
-        with target.open(encoding="utf-8", errors="replace") as fh:
-            for idx, line in enumerate(fh, start=1):
-                if idx == line_no:
-                    return line.rstrip("\n")[:_MAX_SNIPPET_CHARS]
+
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        total = len(lines)
+        if line_no < 1 or line_no > total:
+            return None
+
+        lo = max(1, line_no - context)
+        hi = min(total, line_no + context)
+        width = len(str(hi))  # pad line numbers to same width
+
+        parts: list[str] = []
+        for i in range(lo, hi + 1):
+            content = lines[i - 1][:_MAX_SNIPPET_CHARS]
+            marker = ">>" if i == line_no else "  "
+            parts.append(f"L{i:{width}}{marker} {content}")
+
+        return "\n".join(parts)
+
     except (OSError, ValueError):
         return None
-    return None
+
+
+def _read_source_line(assets_dir: Path, file_ref: str, line_no: int) -> str | None:
+    """Return the verbatim source line at ``file_ref:line_no``, or None.
+
+    Kept for backward compatibility with callers that need a single-line string
+    (e.g. the path-traversal test suite). New code should use
+    :func:`_read_source_context` instead.
+    """
+    result = _read_source_context(assets_dir, file_ref, line_no, context=0)
+    if result is None:
+        return None
+    # context=0 → exactly one line formatted as "LN>>  content"; strip prefix.
+    if ">>" in result:
+        return result.split(">>", 1)[1].lstrip()
+    return result
 
 
 # Common extensions to try when an evidence file_ref doesn't resolve on disk
@@ -598,16 +647,19 @@ def _repair_evidence_file_ref(file_ref: str, assets_dir: Path) -> str | None:
 
 
 def _rehydrate_evidence(node: Any, assets_dir: Path) -> int:
-    """Attach a verbatim ``snippet`` to every {file, line} evidence object.
+    """Attach a ±``_CONTEXT_LINES`` source context block to every {file, line} evidence object.
 
     Walks the audit recursively (the model decides the nesting) and, for any
-    dict carrying a string ``file`` and an int ``line``, splices in the exact
-    source line. Mutates in place; never raises.
+    dict carrying a string ``file`` and an int ``line``, splices in a
+    multi-line context window centred on the cited line. Mutates in place;
+    never raises.
 
-    Returns the number of file_ref repairs applied (patch 0068): when the
-    initial path doesn't resolve but a common-extension variant does,
-    ``node["file"]`` is updated in place and the count increments. Callers
-    can surface the total in audit notes when > 0.
+    Patch 0068: when the initial path doesn't resolve but a common-extension
+    variant does, ``node["file"]`` is updated in place and the repair count
+    increments. Callers surface the total in audit notes when > 0.
+
+    Patch 0094: snippet upgraded from a single line to a ±_CONTEXT_LINES
+    window (see ``_read_source_context``).
     """
     repairs = 0
     if isinstance(node, dict):
@@ -616,13 +668,13 @@ def _rehydrate_evidence(node: Any, assets_dir: Path) -> int:
         if isinstance(line_no, str) and line_no.isdigit():
             line_no = int(line_no)
         if isinstance(file_ref, str) and isinstance(line_no, int) and not isinstance(line_no, bool):
-            snippet = _read_source_line(assets_dir, file_ref, line_no)
+            snippet = _read_source_context(assets_dir, file_ref, line_no)
             if snippet is None:
                 # Patch 0068: try extension-repair before giving up.
                 repaired_ref = _repair_evidence_file_ref(file_ref, assets_dir)
                 if repaired_ref is not None:
                     node["file"] = repaired_ref
-                    snippet = _read_source_line(assets_dir, repaired_ref, line_no)
+                    snippet = _read_source_context(assets_dir, repaired_ref, line_no)
                     repairs += 1
             if snippet is not None:
                 node["snippet"] = snippet

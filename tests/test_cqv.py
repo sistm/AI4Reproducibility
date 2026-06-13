@@ -515,7 +515,84 @@ def test_repair_evidence_file_ref_rejects_path_traversal(tmp_path):
     assert out is None
 
 
-def test_rehydrate_evidence_mutates_path_and_returns_repair_count(tmp_path):
+# --- _read_source_context (patch 0094) ------------------------------------
+
+def test_read_source_context_marks_target_line(tmp_path):
+    """Cited line is marked with '>>' in the context block."""
+    from tools.orchestrator.cqv import _read_source_context
+
+    (tmp_path / "a.R").write_text("\n".join(f"x_{i} <- {i}" for i in range(20)))
+    result = _read_source_context(tmp_path, "a.R", 10)
+    assert result is not None
+    assert ">>" in result
+    target_lines = [ln for ln in result.splitlines() if ">>" in ln]
+    assert len(target_lines) == 1
+    assert "x_9" in target_lines[0]  # line 10 is 0-indexed x_9
+
+
+def test_read_source_context_includes_neighbours(tmp_path):
+    """Context window includes lines above and below the cited line."""
+    from tools.orchestrator.cqv import _CONTEXT_LINES, _read_source_context
+
+    content = "\n".join(f"line_{i}" for i in range(50))
+    (tmp_path / "a.R").write_text(content)
+    result = _read_source_context(tmp_path, "a.R", 25)
+    assert result is not None
+    block_lines = result.splitlines()
+    # Should have 2*CONTEXT_LINES + 1 lines in normal case
+    assert len(block_lines) == 2 * _CONTEXT_LINES + 1
+
+
+def test_read_source_context_clips_at_file_boundaries(tmp_path):
+    """Context doesn't go negative or past EOF — clips gracefully."""
+    from tools.orchestrator.cqv import _read_source_context
+
+    (tmp_path / "a.R").write_text("only_one_line")
+    result = _read_source_context(tmp_path, "a.R", 1)
+    assert result is not None
+    assert ">>" in result
+    assert len(result.splitlines()) == 1
+
+
+def test_read_source_context_path_traversal_rejected(tmp_path):
+    """Context reader rejects refs that escape assets_dir."""
+    from tools.orchestrator.cqv import _read_source_context
+
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (tmp_path / "secret.R").write_text("password <- 'hunter2'")
+    result = _read_source_context(inner, "../secret.R", 1)
+    assert result is None
+
+
+def test_read_source_context_missing_file_returns_none(tmp_path):
+    from tools.orchestrator.cqv import _read_source_context
+
+    result = _read_source_context(tmp_path, "nonexistent.R", 1)
+    assert result is None
+
+
+def test_read_source_context_out_of_range_line_returns_none(tmp_path):
+    from tools.orchestrator.cqv import _read_source_context
+
+    (tmp_path / "a.R").write_text("x <- 1\n")
+    assert _read_source_context(tmp_path, "a.R", 999) is None
+
+
+def test_rehydrate_evidence_snippet_is_multiline(tmp_path):
+    """Snippet attached by _rehydrate_evidence is now a multi-line context
+    block, not a bare single line."""
+    from tools.orchestrator.cqv import _rehydrate_evidence
+
+    (tmp_path / "a.R").write_text("\n".join(f"x <- {i}" for i in range(20)))
+    node = {"file": "a.R", "line": 10}
+    _rehydrate_evidence(node, tmp_path)
+    assert "snippet" in node
+    assert "\n" in node["snippet"]  # multi-line
+    assert ">>" in node["snippet"]  # target marker
+
+
+
     """End-to-end through _rehydrate_evidence: a bad path gets repaired
     in place, the snippet attaches to the repaired path, and the count
     reflects the number of repairs."""

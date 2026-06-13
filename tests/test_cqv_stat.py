@@ -130,7 +130,11 @@ def test_evidence_rehydrated_with_verbatim_source_line(tmp_path):
     }
     out = run_cqv("rehy", root=tmp_path, complete_fn=_audit_backend(audit))
     ev = out["repository_audit"]["issues"][0]["evidence"][0]
-    assert ev["snippet"] == 'setwd(file.path(main.path, "code"))'  # exact, quotes intact
+    # Patch 0094: snippet is now a ±_CONTEXT_LINES context block; the cited
+    # line is marked with ">>" — check content and marker, not exact equality.
+    assert "snippet" in ev
+    assert ">>" in ev["snippet"]                               # marker present
+    assert 'setwd(file.path(main.path, "code"))' in ev["snippet"]  # line present
 
 
 def test_bad_file_or_line_reference_is_skipped_not_crashed(tmp_path):
