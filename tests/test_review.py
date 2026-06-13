@@ -2033,3 +2033,99 @@ def test_run_review_writes_visual_adjudications_file(tmp_path):
     adj = next(a for a in adjs if a.get("artifact") == "fig-1")
     assert adj["status"] == "pass"
     assert adj["visual_adjudication"]["classification"] == "cosmetic"
+
+
+# ---------------------------------------------------------------------------
+# patch 0093 — dynamic checklist wiring
+# ---------------------------------------------------------------------------
+
+def test_compute_dynamic_verdicts_all_pass():
+    from tools.orchestrator.review import _compute_dynamic_verdicts
+    er = {
+        "status": "success",
+        "comparisons": [
+            {"kind": "figure", "status": "pass", "artifact": "fig1.png"},
+            {"kind": "figure", "status": "pass", "artifact": "fig2.png"},
+            {"kind": "table",  "status": "pass", "artifact": "tab1.csv"},
+        ],
+    }
+    v = _compute_dynamic_verdicts(er)
+    assert v["audit-verify-figures-match"] == "PASS"
+    assert v["audit-verify-tables-match"] == "PASS"
+
+
+def test_compute_dynamic_verdicts_figure_fail():
+    from tools.orchestrator.review import _compute_dynamic_verdicts
+    er = {
+        "status": "success",
+        "comparisons": [
+            {"kind": "figure", "status": "fail", "artifact": "fig1.png"},
+            {"kind": "figure", "status": "pass", "artifact": "fig2.png"},
+        ],
+    }
+    v = _compute_dynamic_verdicts(er)
+    assert v["audit-verify-figures-match"] == "FAIL"
+    assert "audit-verify-tables-match" not in v  # no table comparisons
+
+
+def test_compute_dynamic_verdicts_mismatch_flagged_gives_unverified():
+    from tools.orchestrator.review import _compute_dynamic_verdicts
+    er = {
+        "status": "success",
+        "comparisons": [
+            {"kind": "figure", "status": "mismatch_flagged", "artifact": "fig1.png"},
+        ],
+    }
+    v = _compute_dynamic_verdicts(er)
+    assert v["audit-verify-figures-match"] == "UNVERIFIED"
+
+
+def test_compute_dynamic_verdicts_no_artifact_produced():
+    from tools.orchestrator.review import _compute_dynamic_verdicts
+    er = {
+        "status": "success",
+        "comparisons": [
+            {"kind": "table", "status": "no_artifact_produced", "artifact": "tab1.csv"},
+        ],
+    }
+    v = _compute_dynamic_verdicts(er)
+    assert v["audit-verify-tables-match"] == "FAIL"
+
+
+def test_compute_dynamic_verdicts_skipped_returns_empty():
+    from tools.orchestrator.review import _compute_dynamic_verdicts
+    for skip_status in ("skipped", "skipped_no_runtime_docs"):
+        er = {"status": skip_status, "comparisons": []}
+        assert _compute_dynamic_verdicts(er) == {}
+
+
+def test_compute_dynamic_verdicts_empty_er_returns_empty():
+    from tools.orchestrator.review import _compute_dynamic_verdicts
+    assert _compute_dynamic_verdicts({}) == {}
+
+
+def test_checklist_prompt_injects_pre_verdicts_block():
+    from tools.orchestrator.review import _checklist_prompt
+    prompt = _checklist_prompt(
+        "ctx", "complete",
+        dynamic_verdicts={
+            "audit-verify-figures-match": "FAIL",
+            "audit-verify-tables-match": "UNVERIFIED",
+        },
+    )
+    assert "Pre-determined verdicts" in prompt
+    assert "audit-verify-figures-match" in prompt
+    assert "**FAIL**" in prompt
+    assert "do not override" in prompt.lower()
+
+
+def test_checklist_prompt_no_block_when_no_verdicts():
+    from tools.orchestrator.review import _checklist_prompt
+    prompt = _checklist_prompt("ctx", "complete", dynamic_verdicts={})
+    assert "Pre-determined verdicts" not in prompt
+
+
+def test_checklist_prompt_no_block_when_verdicts_none():
+    from tools.orchestrator.review import _checklist_prompt
+    prompt = _checklist_prompt("ctx", "complete")
+    assert "Pre-determined verdicts" not in prompt

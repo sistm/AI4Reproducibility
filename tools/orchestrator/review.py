@@ -725,6 +725,52 @@ def _risk_prompt(
     )
 
 
+def _compute_dynamic_verdicts(er: dict[str, Any]) -> dict[str, str]:
+    """Deterministically compute checklist verdicts for dynamic items from ER output.
+
+    Dynamic items (check_type: dynamic in checklist.yaml) cannot be assessed
+    statically; their verdicts come from ER's ``comparisons[]``. This function
+    aggregates comparison statuses by artifact kind and returns a mapping of
+    checklist item id → verdict string (PASS/FAIL/UNVERIFIED).
+
+    Aggregation rules (per-kind, across all comparisons of that kind):
+    - Any ``fail`` or ``no_artifact_produced`` → FAIL
+    - Any ``mismatch_flagged`` (and no fail) → UNVERIFIED
+    - All ``pass`` → PASS
+
+    Returns an empty dict when ER was skipped or has no comparisons, so the
+    model is free to set the verdict itself based on the prose guidance.
+    """
+    if er.get("status") in ("skipped", "skipped_no_runtime_docs") or not er.get("comparisons"):
+        return {}
+
+    figure_statuses = [
+        c["status"] for c in er["comparisons"] if c.get("kind") == "figure"
+    ]
+    table_statuses = [
+        c["status"] for c in er["comparisons"]
+        if c.get("kind") in ("table", "plot_data")
+    ]
+
+    def _aggregate(statuses: list[str]) -> str | None:
+        if not statuses:
+            return None
+        if any(s in ("fail", "no_artifact_produced") for s in statuses):
+            return "FAIL"
+        if any(s == "mismatch_flagged" for s in statuses):
+            return "UNVERIFIED"
+        if all(s == "pass" for s in statuses):
+            return "PASS"
+        return "UNVERIFIED"
+
+    verdicts: dict[str, str] = {}
+    if (fig_v := _aggregate(figure_statuses)) is not None:
+        verdicts["audit-verify-figures-match"] = fig_v
+    if (tab_v := _aggregate(table_statuses)) is not None:
+        verdicts["audit-verify-tables-match"] = tab_v
+    return verdicts
+
+
 def _load_checklist_rubric() -> str:
     """Return the 24-item rubric as a numbered plain-text list for prompt injection.
 
@@ -742,18 +788,19 @@ def _load_checklist_rubric() -> str:
 
 
 def _checklist_prompt(
-    context: str, assessment_status: str, *, evidence_files: str = "",
+    context: str,
+    assessment_status: str,
+    *,
+    evidence_files: str = "",
+    dynamic_verdicts: dict[str, str] | None = None,
 ) -> str:
     """Build the checklist.md prompt with rubric and template injected verbatim.
 
-    The model receives the 24 item IDs/descriptions from checklist.yaml and the
-    filled-template skeleton from review-template.md so it anchors to the exact
-    rubric rather than free-generating items.
-
-    Patch 0062: checklist [AUDIT NOTE] tokens are cited evidence too — same
-    fabrication risk as the risk-matrix and final-review prompts. Inject the
-    available-files block and cite-format rules so the model is held to the
-    same standard.
+    Patch 0062: checklist [AUDIT NOTE] tokens are cited evidence too — inject
+    available-files block and cite-format rules.
+    Patch 0093: inject pre-determined verdicts for dynamic checklist items
+    (``audit-verify-figures-match``, ``audit-verify-tables-match``) computed
+    deterministically from ER comparisons — the model must not override these.
     """
     rubric = _load_checklist_rubric()
     template = load_skill("review/assets/review-template.md")
@@ -761,12 +808,29 @@ def _checklist_prompt(
     files_block = (
         f"<available_evidence_files>\n{files_listing}\n</available_evidence_files>\n\n"
     )
+
+    pre_verdicts_block = ""
+    if dynamic_verdicts:
+        rows = "\n".join(
+            f"  - {item_id}: **{verdict}** (set by ER; do not override)"
+            for item_id, verdict in sorted(dynamic_verdicts.items())
+        )
+        pre_verdicts_block = (
+            "## Pre-determined verdicts (patch 0093 — do NOT override)\n\n"
+            "The following checklist items have been decided deterministically "
+            "from ER comparison results. Set their [VERDICT] tokens to exactly "
+            "the value shown below — the rationale is already established by "
+            "the ER comparison evidence in the upstream outputs.\n\n"
+            f"{rows}\n\n"
+        )
+
     return (
         f"{_UPSTREAM_SECURITY_NOTICE}\n\n"
         f"<upstream_outputs assessment_status={assessment_status}>\n"
         f"{context}\n"
         "</upstream_outputs>\n\n"
         f"{files_block}"
+        f"{pre_verdicts_block}"
         "---\n\n"
         "## Checklist rubric — use these 24 item IDs and descriptions verbatim\n\n"
         f"{rubric}\n\n"
@@ -1478,7 +1542,10 @@ def run_review(
         try:
             prompt = (
                 _checklist_prompt(
-                    context, assessment_status, evidence_files=evidence_files,
+                    context,
+                    assessment_status,
+                    evidence_files=evidence_files,
+                    dynamic_verdicts=_compute_dynamic_verdicts(er or {}),
                 )
                 if filename == "checklist.md"
                 else _md_prompt(
