@@ -162,3 +162,61 @@ def test_mtp_threshold_evidence_reaches_model():
     out = run_stat_judge(_check("cqv-stat-multiple-testing"), evidence, complete_fn=fake)
     assert fake.calls == 1, "Model must be called when threshold-based evidence is present"
     assert out["verdict"] == "pass"
+
+
+# ---------------------------------------------------------------------------
+# no_post_hoc rubric regression tests (patch 0095)
+# ---------------------------------------------------------------------------
+
+def test_no_post_hoc_rubric_requires_all_three_conditions():
+    """FAIL requires undisclosed + absent from Methods + affects inference.
+    The rubric must not flag disclosed additions."""
+    check = _check("cqv-stat-no-post-hoc")
+    rubric = check.rubric.lower()
+    assert "all three" in rubric or "all of the following" in rubric or "(a)" in rubric
+
+
+def test_no_post_hoc_rubric_exempts_reviewer_requested():
+    """Reviewer-requested additions must be explicitly listed as DO NOT FAIL."""
+    check = _check("cqv-stat-no-post-hoc")
+    assert "reviewer" in check.rubric.lower()
+    assert "do not fail" in check.rubric.lower()
+
+
+def test_no_post_hoc_rubric_exempts_sensitivity_analyses():
+    """Sensitivity analyses must be explicitly exempted."""
+    check = _check("cqv-stat-no-post-hoc")
+    assert "sensitivity" in check.rubric.lower()
+
+
+def test_no_post_hoc_rubric_exempts_bayesian_posteriors():
+    """DP/Gibbs/MCMC posterior computations must be explicitly exempted —
+    this is the specific pattern that caused the false positive on bimj_202400278."""
+    check = _check("cqv-stat-no-post-hoc")
+    rubric = check.rubric.lower()
+    assert any(kw in rubric for kw in ("gibbs", "mcmc", "bayesian", "dp"))
+
+
+def test_no_post_hoc_rubric_clarifies_no_preregistration_required():
+    """Biometrical Journal doesn't require pre-registration; the rubric must
+    not penalise absence of a registered protocol."""
+    check = _check("cqv-stat-no-post-hoc")
+    rubric = check.rubric.lower()
+    assert "pre-registration" in rubric or "preregistration" in rubric or "biometrical" in rubric
+
+
+def test_no_post_hoc_reviewer_evidence_calls_model():
+    """When evidence includes 'added in response to reviewer' language the judge
+    is invoked — not short-circuited — and must not automatically fail."""
+    evidence = (
+        "# Section 4.1 — Posterior-of-M analysis\n"
+        "# Added in response to reviewer comment requesting a DP sensitivity check.\n"
+        "dp_gibbs <- function(p_vals, alpha=0.05, n_iter=10000) {\n"
+        "  # Gibbs sampler for DP-MTP\n"
+        "}\n"
+    )
+    fake = _Recorder({"verdict": "pass", "confidence": "high",
+                      "rationale": "reviewer-requested sensitivity analysis, disclosed"})
+    out = run_stat_judge(_check("cqv-stat-no-post-hoc"), evidence, complete_fn=fake)
+    assert fake.calls == 1
+    assert out["verdict"] == "pass"
