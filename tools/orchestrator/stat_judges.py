@@ -1,9 +1,11 @@
-"""Statistical-validity judges for CQV (cqv_checklist.yaml ``category: stat``).
+"""Statistical-validity and code-quality judges for CQV (cqv_checklist.yaml).
 
-The seven ``check_type: llm`` items in ``cqv_checklist.yaml`` need LLM judgment:
-whether tests check their assumptions, whether multiple testing is corrected,
-whether there is train/test leakage, and so on. Their ``judge_*`` tool_ids were
-declarations only — this module makes them executable.
+All 16 ``check_type: llm`` items in ``cqv_checklist.yaml`` are implemented here.
+The original seven cover statistical-validity (test assumptions, MTP, data
+leakage, CI construction, representative sampling, post-hoc adjustment, model
+diagnostics).  Nine new judges added in patch 0099 cover: NA handling, type
+handling, dataframe mutation, object copying, path sanitization, docstring
+quality, edge-case coverage, integration test coverage, and deprecated packages.
 
 Each judge is one bounded, tool-less model call: a fixed reviewer frame plus a
 per-check rubric, given EVIDENCE, returning a structured verdict. Evidence is
@@ -14,10 +16,6 @@ evidence and the caller (``run_cqv``) wires the two together.
 Two checks (representative-sampling, no-post-hoc) cannot be judged from code
 alone — they need the paper's stated plan/population — so they additionally take
 KBE output as context (``needs_kbe``).
-
-The rubrics are grounded in the project's own
-``references/STATISTICAL_VALIDATION.md`` (R idioms) and carry the Python
-equivalents, since the checklist items are ``applies_to: [r, python]``.
 
 Verdicts: ``pass`` (handled/justified), ``fail`` (a clear violation is present),
 ``not_applicable`` (the situation the check targets does not arise in the
@@ -229,6 +227,206 @@ STAT_CHECKS: tuple[StatCheck, ...] = (
             "for regression; calibration, ROC, or a confusion matrix for "
             "classification? FAIL if models are fit and interpreted with no diagnostics "
             "where diagnostics are standard for that model class."
+        ),
+    ),
+    # ── Data-handling judges ──────────────────────────────────────────────────
+    StatCheck(
+        item_id="cqv-data-na-handling",
+        tool_id="judge_na_handling",
+        severity="major",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Are missing values (NA / NaN / None) handled explicitly in critical "
+            "computations? "
+            "FAIL if any of the following are present without safeguards: "
+            "(1) R summary functions (sum, mean, var, sd, min, max) called WITHOUT "
+            "na.rm=TRUE on data that may contain NAs; "
+            "(2) Python numpy/pandas aggregations (np.sum, df.mean, etc.) called "
+            "without dropna() / fillna() / skipna=True on potentially missing data. "
+            "PASS if a global na.omit() / complete.cases() / dropna() is applied "
+            "before analysis, or if na.rm=TRUE is consistently present, or if the "
+            "dataset is documented to contain no missing values. "
+            "PASS if models use na.action=na.omit (R default) and this is appropriate. "
+            "Mark not_applicable if no aggregation or modelling code is present. "
+            "Mark unverified if the evidence is ambiguous about whether missing values "
+            "can occur."
+        ),
+    ),
+    StatCheck(
+        item_id="cqv-data-explicit-types",
+        tool_id="judge_type_handling",
+        severity="minor",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Are column types explicitly declared or coerced rather than left to "
+            "inference? "
+            "PASS if data loading specifies types (R: colClasses=, col_types=; "
+            "Python: dtype=) or if types are explicitly coerced after loading "
+            "(as.numeric(), as.integer(), as.factor(), pd.to_numeric(), etc.). "
+            "PASS if the submission is analysis-only code where types were set "
+            "upstream and can be assumed. "
+            "FAIL only when there is evidence of a type mismatch that could corrupt "
+            "results — e.g. a character column used in arithmetic without coercion, "
+            "or a factor silently coerced to integer in a numeric context without "
+            "explicit intent. "
+            "Mark not_applicable if no data loading or type-sensitive operations are "
+            "present. Do NOT fail merely because colClasses is absent; the absence of "
+            "explicit type declarations is normal for research code."
+        ),
+    ),
+    StatCheck(
+        item_id="cqv-data-no-unexpected-mutation",
+        tool_id="judge_dataframe_mutation",
+        severity="minor",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Are data-frame mutations explicit and intentional, with no surprising "
+            "side-effects on caller-side state? "
+            "FAIL if a function modifies a data argument via superassignment (R: <<-) "
+            "or data.table in-place assignment (:=) in ways that would silently "
+            "mutate the caller's copy without being documented. "
+            "PASS for dplyr pipe chains that return new objects. "
+            "PASS for data.table := mutations that are clearly intentional "
+            "(data.table reference semantics are documented). "
+            "PASS for Python in-place mutations (df.drop(inplace=True)) if the "
+            "function's intent is clearly to mutate its argument. "
+            "Mark not_applicable if no functions with data-frame arguments are present. "
+            "Mark unverified if the code uses complex metaprogramming that makes "
+            "mutation difficult to trace. "
+            "Do NOT fail on ordinary R copy-on-modify semantics — R copies data "
+            "frames on assignment by default."
+        ),
+    ),
+    # ── Performance judge ─────────────────────────────────────────────────────
+    StatCheck(
+        item_id="cqv-perf-no-redundant-copies",
+        tool_id="judge_object_copying",
+        severity="suggestion",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Are there avoidable copies of large data objects that could be eliminated? "
+            "FLAG (suggestion, not a blocker) if you see: "
+            "(1) Identity assignments: data <- data or df = df with no transformation; "
+            "(2) A full data-frame copied into a new variable only to have one column "
+            "renamed or selected — where mutate/select/rename would suffice; "
+            "(3) Repeated deep copies inside a loop (not data.table := patterns). "
+            "PASS for defensive copies that prevent unexpected mutation. "
+            "PASS for Python .copy() when numpy/pandas copy-on-slice semantics "
+            "require it. "
+            "This is a suggestion; mark not_applicable if no large-data manipulation "
+            "is present, or if the patterns are ambiguous."
+        ),
+    ),
+    # ── Security judge ────────────────────────────────────────────────────────
+    StatCheck(
+        item_id="cqv-sec-path-sanitization",
+        tool_id="judge_path_sanitization",
+        severity="major",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Are file paths constructed from external inputs validated against "
+            "path-traversal attacks (../ escape)? "
+            "Mark not_applicable — the common case for research code — if all file "
+            "paths are hardcoded string literals or constructed only from "
+            "non-user-supplied variables (e.g. constants set at the top of the script). "
+            "FAIL only if a path is built by concatenating an unvalidated external "
+            "input (from commandArgs(), readline(), Sys.getenv(), argparse, sys.argv, "
+            "or a config file) AND no normalisation or traversal check is present "
+            "(normalizePath(mustWork=TRUE), realpath(), stopifnot(!grepl('..', path))). "
+            "PASS if any of those safeguards are present. "
+            "Do NOT fail on paths built from environment variables that are documented "
+            "to be set by the researcher (not user-supplied)."
+        ),
+    ),
+    # ── Documentation judge ───────────────────────────────────────────────────
+    StatCheck(
+        item_id="cqv-doc-docstring-format",
+        tool_id="judge_docstring_quality",
+        severity="minor",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Where docstrings or roxygen blocks exist, do they include argument "
+            "descriptions, return values, and any notable side effects? "
+            "Mark not_applicable if no docstrings or roxygen blocks are present "
+            "(the absence of docstrings is covered by check_function_docs_present, "
+            "not this check). "
+            "PASS if each documented function includes at minimum: a one-sentence "
+            "description plus either @param/@return tags (R) or an Args/Returns "
+            "section (Python). "
+            "FAIL if docstrings exist but are essentially empty — just the function "
+            "name repeated or a single-word stub with no param or return information "
+            "for a non-trivial function (> 10 lines). "
+            "This is a minor check; do not fail for missing @examples or minor "
+            "formatting inconsistencies."
+        ),
+    ),
+    # ── Testing judges ────────────────────────────────────────────────────────
+    StatCheck(
+        item_id="cqv-test-edge-cases",
+        tool_id="judge_edge_case_coverage",
+        severity="suggestion",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Where a test suite exists, does it cover edge cases? "
+            "Mark not_applicable if no test files are present (the absence of tests "
+            "is covered by check_test_directory_present). "
+            "PASS if any tests include: NA/NaN/None inputs, empty vectors/DataFrames "
+            "(integer(0), character(0), pd.DataFrame()), zero-length or single-element "
+            "inputs, boundary numeric values (0, -1, Inf, NaN), or documented error "
+            "conditions (expect_error, pytest.raises). "
+            "FLAG (suggestion) if a test suite exists but all tests use only "
+            "'happy path' inputs with no edge-case coverage. "
+            "Do not apply a strict standard — research code tests are rare; "
+            "reward any edge-case coverage present."
+        ),
+    ),
+    StatCheck(
+        item_id="cqv-test-integration",
+        tool_id="judge_integration_test_coverage",
+        severity="suggestion",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Where a test suite exists, does it include an integration test that "
+            "exercises the main analysis pipeline end-to-end? "
+            "Mark not_applicable if no test files are present. "
+            "PASS if any test: (1) calls the main entry-point function or sources "
+            "the main script, AND (2) uses a small fixture dataset (not just mocked "
+            "data of trivial size) AND (3) checks that the output has the expected "
+            "shape or key values. "
+            "FLAG (suggestion) only if tests exist but are limited to unit tests of "
+            "individual helpers with no end-to-end coverage. "
+            "This is a suggestion; do not penalise research code for lacking "
+            "integration tests."
+        ),
+    ),
+    # ── Dependencies judge ────────────────────────────────────────────────────
+    StatCheck(
+        item_id="cqv-dep-no-deprecated",
+        tool_id="judge_deprecated_packages",
+        severity="suggestion",
+        applies_to=("r", "python"),
+        needs_kbe=False,
+        rubric=(
+            "Are any imported packages deprecated or superseded by the ecosystem? "
+            "PASS if no deprecated packages are used. "
+            "FLAG (suggestion) for the following known cases: "
+            "R — sp, rgeos, rgdal, maptools (superseded by sf/terra, archived on CRAN "
+            "since Oct 2023); reshape/reshape2 (superseded by tidyr); plyr (superseded "
+            "by dplyr for most use cases); xlsx (prefer openxlsx or readxl); "
+            "RMySQL (prefer RMariaDB). "
+            "Python — distutils (removed in 3.12); imp module (removed in 3.12); "
+            "optparse (prefer argparse); nose (prefer pytest). "
+            "Do NOT flag packages that are still actively maintained even if older "
+            "alternatives exist. "
+            "Mark unverified if import statements are not visible in the evidence."
         ),
     ),
 )

@@ -39,20 +39,25 @@ def _check(item_id):
     return next(c for c in STAT_CHECKS if c.item_id == item_id)
 
 
-def test_there_are_seven_checks():
-    assert len(STAT_CHECKS) == 7
+def test_there_are_sixteen_checks():
+    assert len(STAT_CHECKS) == 16
 
 
 def test_checks_match_yaml_source_of_truth():
     data = yaml.safe_load((_REPO_ROOT / "cqv_checklist.yaml").read_text())
-    yaml_stat = {
+    # Judges span stat, data, perf, sec, doc, test, dep categories — not stat only
+    yaml_llm = {
         item["id"]: item
         for item in data["items"]
-        if item.get("category") == "stat"
+        if item.get("check_type") == "llm"
     }
-    assert {c.item_id for c in STAT_CHECKS} == set(yaml_stat)
+    impl_ids = {c.item_id for c in STAT_CHECKS}
+    assert impl_ids == set(yaml_llm), (
+        f"Missing from STAT_CHECKS: {set(yaml_llm) - impl_ids}\n"
+        f"Extra in STAT_CHECKS: {impl_ids - set(yaml_llm)}"
+    )
     for c in STAT_CHECKS:
-        item = yaml_stat[c.item_id]
+        item = yaml_llm[c.item_id]
         assert c.tool_id == item["tool_id"]
         assert c.severity == item["severity"]
         assert item["check_type"] == "llm"
@@ -220,3 +225,129 @@ def test_no_post_hoc_reviewer_evidence_calls_model():
     out = run_stat_judge(_check("cqv-stat-no-post-hoc"), evidence, complete_fn=fake)
     assert fake.calls == 1
     assert out["verdict"] == "pass"
+
+
+# ---------------------------------------------------------------------------
+# patch 0099 — 9 new LLM judges (rubric smoke tests)
+# ---------------------------------------------------------------------------
+
+def test_na_handling_rubric_requires_na_rm():
+    check = _check("cqv-data-na-handling")
+    rubric = check.rubric.lower()
+    assert "na.rm" in rubric
+    assert "pass" in rubric and "fail" in rubric
+
+
+def test_na_handling_not_applicable_on_no_evidence():
+    out = run_stat_judge(_check("cqv-data-na-handling"), "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_na_handling_calls_model_on_aggregation_code():
+    evidence = "result <- mean(x)\ntotal <- sum(values)\n"
+    fake = _Recorder({"verdict": "fail", "confidence": "high",
+                      "rationale": "mean() called without na.rm=TRUE"})
+    out = run_stat_judge(_check("cqv-data-na-handling"), evidence, complete_fn=fake)
+    assert fake.calls == 1
+    assert out["verdict"] == "fail"
+
+
+def test_type_handling_rubric_not_fail_on_absence_alone():
+    check = _check("cqv-data-explicit-types")
+    rubric = check.rubric.lower()
+    assert "do not fail" in rubric or "not fail merely" in rubric
+
+
+def test_type_handling_not_applicable_on_no_evidence():
+    out = run_stat_judge(_check("cqv-data-explicit-types"), "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_dataframe_mutation_rubric_exempts_dplyr():
+    check = _check("cqv-data-no-unexpected-mutation")
+    assert "dplyr" in check.rubric.lower()
+    assert "not_applicable" in check.rubric.lower() or "mark not_applicable" in check.rubric.lower()
+
+
+def test_dataframe_mutation_not_applicable_on_no_evidence():
+    out = run_stat_judge(_check("cqv-data-no-unexpected-mutation"), "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_object_copying_is_suggestion_severity():
+    assert _check("cqv-perf-no-redundant-copies").severity == "suggestion"
+
+
+def test_object_copying_not_applicable_on_no_evidence():
+    out = run_stat_judge(_check("cqv-perf-no-redundant-copies"), "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_path_sanitization_rubric_exempts_hardcoded():
+    check = _check("cqv-sec-path-sanitization")
+    rubric = check.rubric.lower()
+    assert "hardcoded" in rubric or "not_applicable" in rubric
+
+
+def test_path_sanitization_not_applicable_on_no_evidence():
+    out = run_stat_judge(_check("cqv-sec-path-sanitization"), "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_docstring_quality_not_applicable_when_no_docs():
+    check = _check("cqv-doc-docstring-format")
+    rubric = check.rubric.lower()
+    assert "not_applicable" in rubric
+    # No evidence → not_applicable
+    out = run_stat_judge(check, "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_edge_case_coverage_is_suggestion():
+    assert _check("cqv-test-edge-cases").severity == "suggestion"
+
+
+def test_edge_case_coverage_not_applicable_without_tests():
+    out = run_stat_judge(_check("cqv-test-edge-cases"), "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_integration_test_not_applicable_without_tests():
+    out = run_stat_judge(_check("cqv-test-integration"), "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_deprecated_packages_rubric_names_known_cases():
+    check = _check("cqv-dep-no-deprecated")
+    rubric = check.rubric.lower()
+    assert "rgdal" in rubric or "rgeos" in rubric or "sp" in rubric
+
+
+def test_deprecated_packages_not_applicable_on_no_evidence():
+    out = run_stat_judge(_check("cqv-dep-no-deprecated"), "")
+    assert out["verdict"] == "not_applicable"
+
+
+def test_all_16_judges_registered():
+    from tools.orchestrator.stat_judges import STAT_CHECKS
+    tool_ids = {c.tool_id for c in STAT_CHECKS}
+    expected = {
+        "judge_test_assumptions", "judge_multiple_testing_correction",
+        "judge_data_leakage", "judge_ci_construction",
+        "judge_sampling_representativeness", "judge_no_post_hoc_adjustment",
+        "judge_model_diagnostics",
+        "judge_na_handling", "judge_type_handling", "judge_dataframe_mutation",
+        "judge_object_copying", "judge_path_sanitization", "judge_docstring_quality",
+        "judge_edge_case_coverage", "judge_integration_test_coverage",
+        "judge_deprecated_packages",
+    }
+    assert tool_ids == expected, f"Missing: {expected - tool_ids}, Extra: {tool_ids - expected}"
+
+
+def test_all_16_item_ids_have_evidence_patterns():
+    from tools.orchestrator.stat_evidence import PATTERNS
+    from tools.orchestrator.stat_judges import STAT_CHECKS
+    for check in STAT_CHECKS:
+        assert check.item_id in PATTERNS, (
+            f"{check.item_id} has no evidence patterns in stat_evidence.PATTERNS"
+        )

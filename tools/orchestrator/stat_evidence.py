@@ -100,6 +100,132 @@ PATTERNS: dict[str, list[re.Pattern[str]]] = {
         r"burn.?in", r"\bgibbs\b", r"\bmcmc\b", r"traceplot", r"geweke", r"gelman",
         r"\brhat\b", r"effectiveSize", r"n[._]eff", r"\bconverg",
     ),
+    # ── Data-handling patterns ────────────────────────────────────────────────
+    "cqv-data-na-handling": _patterns(
+        # NA guards used correctly
+        r"\bna\.rm\s*=", r"\bna\.omit\s*\(", r"\bcomplete\.cases\s*\(",
+        r"\bna\.action\s*=", r"\bna\.pass\b", r"\bna\.fail\b",
+        r"drop_na\s*\(", r"\.dropna\s*\(", r"\.fillna\s*\(", r"\.isna\s*\(",
+        r"pd\.isna\s*\(", r"pd\.notna\s*\(", r"np\.isnan\s*\(",
+        # Aggregation functions that need na.rm
+        r"\bsum\s*\(", r"\bmean\s*\(", r"\bvar\s*\(", r"\bsd\s*\(",
+        r"\bmin\s*\(", r"\bmax\s*\(", r"\bmedian\s*\(",
+        r"\bcolSums\s*\(", r"\bcolMeans\s*\(", r"\browSums\s*\(", r"\browMeans\s*\(",
+        # NA detection
+        r"\bis\.na\s*\(", r"\banyNA\s*\(", r"\bwhich\s*\(\s*is\.na",
+    ),
+    "cqv-data-explicit-types": _patterns(
+        # Data loading — presence of type specification
+        r"\bcolClasses\s*=", r"\bcol_types\s*=", r"\bdtype\s*=",
+        # Explicit coercions
+        r"\bas\.numeric\s*\(", r"\bas\.integer\s*\(", r"\bas\.character\s*\(",
+        r"\bas\.factor\s*\(", r"\bas\.logical\s*\(", r"\bas\.double\s*\(",
+        r"pd\.to_numeric\s*\(", r"pd\.to_datetime\s*\(", r"\.astype\s*\(",
+        # Data reading (to check if types are specified)
+        r"\bread\.csv\s*\(", r"\bread_csv\s*\(", r"\bread\.table\s*\(",
+        r"\bfread\s*\(", r"\bread_excel\s*\(", r"\bpd\.read_csv\s*\(",
+        # Type inspection
+        r"\bclass\s*\(", r"\btypeof\s*\(", r"\bstr\s*\(", r"\bsapply\s*\(.*class",
+    ),
+    "cqv-data-no-unexpected-mutation": _patterns(
+        # Superassignment (mutates outer/global state from inside a function)
+        r"\s<<-\s",
+        # data.table in-place assignment
+        r":=\s", r"\bset\s*\(", r"\bsetnames\s*\(", r"\bsetcolorder\s*\(",
+        # Python in-place
+        r"\.drop\s*\(.*inplace\s*=\s*True",
+        r"\.rename\s*\(.*inplace\s*=\s*True",
+        r"\.fillna\s*\(.*inplace\s*=\s*True",
+        r"\.dropna\s*\(.*inplace\s*=\s*True",
+        # Function definitions that take df-like args
+        r"function\s*\(.*data", r"function\s*\(.*df",
+        r"def\s+\w+\s*\(.*df", r"def\s+\w+\s*\(.*data",
+    ),
+    # ── Performance patterns ──────────────────────────────────────────────────
+    "cqv-perf-no-redundant-copies": _patterns(
+        # Explicit copies
+        r"\bcopy\s*\(", r"\.copy\s*\(\s*\)",
+        # Identity-like assignment patterns
+        r"\bdata\s*<-\s*data\b", r"\bdf\s*<-\s*df\b",
+        # Full dataset copy before modification
+        r"\w+\s*<-\s*\w+\s*\n.*\$",
+        r"\w+_copy\b", r"\w+_bak\b", r"\w+_backup\b",
+        # Repeated concatenation in loops (already caught by growing_vectors but
+        # object_copying judge focuses on data-frame level)
+        r"\brbind\s*\(", r"\bcbind\s*\(", r"\bbind_rows\s*\(",
+    ),
+    # ── Security patterns ─────────────────────────────────────────────────────
+    "cqv-sec-path-sanitization": _patterns(
+        # External input sources
+        r"\bcommandArgs\s*\(", r"\breadline\s*\(", r"\bSys\.getenv\s*\(",
+        r"\bargparse\b", r"\bsys\.argv\b", r"\boptparse\b",
+        # Path construction
+        r"\bfile\.path\s*\(", r"\bpaste\s*\(.*path", r"\bpaste0\s*\(.*path",
+        r"\bnormalizePath\s*\(", r"\brealpath\b", r"\bpathlib\b",
+        r"os\.path\.join\s*\(", r"os\.path\.abspath\s*\(",
+        # Traversal indicators
+        r"\.\./", r"\.\.\\\\",
+        # Validation patterns
+        r"stopifnot.*path", r"grepl.*\.\.", r"str_detect.*\.\.",
+    ),
+    # ── Documentation patterns ────────────────────────────────────────────────
+    "cqv-doc-docstring-format": _patterns(
+        # R roxygen
+        r"^#'\s*@param\b", r"^#'\s*@return\b", r"^#'\s*@export\b",
+        r"^#'\s*@examples\b", r"^#'\s*@description\b",
+        r"^#'",  # any roxygen line (to surface presence of docs)
+        # Python docstrings
+        r'"""', r"'''",
+        r"\bArgs\s*:\s*$", r"\bReturns\s*:\s*$", r"\bRaises\s*:\s*$",
+        r"\bParameters\s*\n\s*-{3,}", r"\bReturns\s*\n\s*-{3,}",
+        # Decorator-based docs
+        r"@staticmethod", r"@classmethod", r"@property",
+    ),
+    # ── Testing patterns ──────────────────────────────────────────────────────
+    "cqv-test-edge-cases": _patterns(
+        # R testthat
+        r"\btest_that\s*\(", r"\bexpect_equal\s*\(", r"\bexpect_error\s*\(",
+        r"\bexpect_true\s*\(", r"\bexpect_false\s*\(", r"\bexpect_warning\s*\(",
+        r"\bexpect_match\s*\(", r"\bexpect_null\s*\(",
+        # Python pytest
+        r"\bpytest\b", r"\bdef test_\w", r"\bassert\b",
+        r"pytest\.raises\s*\(", r"pytest\.warns\s*\(",
+        # Edge-case inputs
+        r"\bNA\b", r"\bNaN\b", r"\bNULL\b", r"\bInf\b",
+        r"integer\s*\(\s*0\s*\)", r"character\s*\(\s*0\s*\)",
+        r"numeric\s*\(\s*0\s*\)", r"logical\s*\(\s*0\s*\)",
+        r"pd\.DataFrame\s*\(\s*\)", r"np\.array\s*\(\s*\[\s*\]\s*\)",
+        r'"edge"', r'"boundary"', r'"empty"', r'"zero"', r'"missing"',
+    ),
+    "cqv-test-integration": _patterns(
+        # Test framework presence
+        r"\btest_that\s*\(", r"\bdef test_\w", r"\bpytest\b",
+        # Fixture data loading inside tests
+        r"\bread\.csv\s*\(", r"\bread_csv\s*\(", r"\bfread\s*\(",
+        r"pd\.read_csv\s*\(", r"\bread\.rds\s*\(", r"\breadRDS\s*\(",
+        # Calling main entry points from tests
+        r"\bsource\s*\(", r"\brun_analysis\b", r"\bmain\s*\(",
+        r"\bimport\s+\w+\s*$", r"\bfrom\s+\w+\s+import\b",
+        # Integration test markers / descriptions
+        r"integration", r"end.?to.?end", r"e2e", r"pipeline",
+        r"full.?run", r"full.?pipeline",
+    ),
+    # ── Dependencies patterns ─────────────────────────────────────────────────
+    "cqv-dep-no-deprecated": _patterns(
+        # All library/require calls — the judge decides which are deprecated
+        r"\blibrary\s*\(", r"\brequire\s*\(",
+        # Specific deprecated R packages
+        r"\blibrary\s*\(\s*sp\b", r"\blibrary\s*\(\s*rgeos\b",
+        r"\blibrary\s*\(\s*rgdal\b", r"\blibrary\s*\(\s*maptools\b",
+        r"\blibrary\s*\(\s*plyr\b", r"\blibrary\s*\(\s*reshape2?\b",
+        r"\blibrary\s*\(\s*xlsx\b", r"\blibrary\s*\(\s*RMySQL\b",
+        # Python deprecated
+        r"\bimport\s+distutils\b", r"\bfrom\s+distutils\b",
+        r"\bimport\s+imp\b", r"\bfrom\s+imp\b",
+        r"\bimport\s+nose\b", r"\bfrom\s+nose\b",
+        # All imports (so the judge can survey the full dependency list)
+        r"^import\s+\w+", r"^from\s+\w+\s+import\b",
+    ),
 }
 
 

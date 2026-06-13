@@ -56,7 +56,7 @@ def test_stat_layer_attached_and_fail_promoted_to_blocker(tmp_path):
     )
     assert out["status"] == "success"
     sv = out["statistical_validity"]
-    assert len(sv) == 7
+    assert len(sv) == 16  # all 16 LLM judges run (patch 0099)
     # the test-assumptions judge ran (had evidence) and failed
     ta = next(v for v in sv if v["item_id"] == "cqv-stat-test-assumptions")
     assert ta["verdict"] == "fail"
