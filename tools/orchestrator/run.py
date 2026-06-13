@@ -97,6 +97,7 @@ def run_pipeline(
     extract_fn: Callable[[Path], str] | None = None,
     run_prepare: bool = True,
     run_validate: bool = True,
+    er_enabled: bool = False,
 ) -> dict[str, Any]:
     """Run the full pipeline for ``review_title``; return a result summary.
 
@@ -140,7 +141,7 @@ def run_pipeline(
     steps["cqv"] = {"status": cqv.get("status"), "failure_mode": cqv.get("failure_mode")}
 
     # --- ER: deferred, write the skipped stub the gate + Review require -----
-    er = run_er(review_title, root=root)
+    er = run_er(review_title, root=root, enabled=er_enabled)
     steps["er"] = {"status": er["status"]}
 
     # --- Review (synthesis; degrades on failed/partial upstream) ------------
@@ -254,9 +255,20 @@ def main(argv: list[str] | None = None) -> int:
         help="LiteLLM model string applied to EVERY stage; omit to use the "
         "per-stage config defaults / AI4R_MODEL_<STAGE> env overrides.",
     )
+    parser.add_argument(
+        "--er-enabled",
+        action="store_true",
+        default=False,
+        help="Enable the ER (Execution & Reproducibility) stage. Requires Docker.",
+    )
     args = parser.parse_args(argv)
 
-    summary = run_pipeline(args.review_title, root=args.root, model=args.model)
+    summary = run_pipeline(
+        args.review_title,
+        root=args.root,
+        model=args.model,
+        er_enabled=args.er_enabled,
+    )
     _print_summary(summary, args.root, args.review_title)
     # Exit 0 for PASS / PARTIAL / SKIPPED; nonzero only for FAIL. PARTIAL is
     # information about upstream degradation, not failure — a PARTIAL run
