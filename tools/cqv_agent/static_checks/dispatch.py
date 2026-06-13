@@ -20,7 +20,7 @@ from typing import Any
 from ._common import CheckResult
 
 # Stubs (AST-requiring; deferred to Phase 3 / tree-sitter-r)
-from ._stubs import (
+from .check_r_ast import (
     check_dead_code,
     check_function_signatures,
     check_loop_invariants,

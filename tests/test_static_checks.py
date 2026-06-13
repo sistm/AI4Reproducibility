@@ -52,9 +52,12 @@ def test_list_static_checks_reports_implementation_status():
     info = list_static_checks()
     assert "check_absolute_paths" in info
     assert info["check_absolute_paths"]["implemented"] is True
-    assert info["check_set_seed_scope"]["implemented"] is True   # patch 0071
-    assert info["check_parse_success"]["implemented"] is True    # patch 0092
-    assert info["check_loop_invariants"]["implemented"] is False  # still stubbed
+    assert info["check_set_seed_scope"]["implemented"] is True        # patch 0071
+    assert info["check_parse_success"]["implemented"] is True         # patch 0092
+    assert info["check_undefined_references"]["implemented"] is True  # patch 0096
+    assert info["check_function_signatures"]["implemented"] is True   # patch 0097
+    assert info["check_dead_code"]["implemented"] is True             # patch 0098
+    assert info["check_loop_invariants"]["implemented"] is True       # patch 0098
 
 
 # ---------------------------------------------------------------------------
@@ -93,12 +96,28 @@ CLEAN_EXPECTED_PASS = [
     "check_duplicate_code_blocks",
     "check_growing_vectors",
     "check_error_handling_coverage",
+    # patches 0096-0098 — AST-based via tree-sitter (optional dep)
+    "check_undefined_references",
+    "check_function_signatures",
+    "check_dead_code",
+    "check_loop_invariants",
 ]
+
+
+_TS_OPTIONAL = frozenset({
+    "check_undefined_references",
+    "check_function_signatures",
+    "check_dead_code",
+    "check_loop_invariants",
+})
 
 
 @pytest.mark.parametrize("tool_id", CLEAN_EXPECTED_PASS)
 def test_clean_repo_passes(tool_id: str):
     result = run_static_check(tool_id, CLEAN)
+    # tree-sitter checks return not_implemented when the optional dep is absent
+    if tool_id in _TS_OPTIONAL and result["status"] == "not_implemented":
+        return
     assert result["status"] in ("pass", "warning"), (
         f"{tool_id}: expected pass/warning on clean repo, got {result['status']}; "
         f"summary={result['summary']}"
@@ -146,12 +165,7 @@ def test_dirty_repo_fails(tool_id: str, expected_statuses: tuple[str, ...]):
 # Stubs return not_implemented (not exceptions)
 # ---------------------------------------------------------------------------
 
-STUBBED_CHECKS = [
-    "check_undefined_references",
-    "check_function_signatures",
-    "check_dead_code",
-    "check_loop_invariants",
-]
+STUBBED_CHECKS: list[str] = []  # no stubs remain — all checks implemented
 
 
 @pytest.mark.parametrize("tool_id", STUBBED_CHECKS)
@@ -510,3 +524,170 @@ def test_error_handling_fail_python_requests_no_try(tmp_path):
     )
     r = run_static_check("check_error_handling_coverage", tmp_path)
     assert r["status"] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# patches 0096-0098 — AST-based checks (tree-sitter-languages, optional dep)
+# ---------------------------------------------------------------------------
+
+def _ts_available() -> bool:
+    try:
+        from tree_sitter_languages import get_parser  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+# check_undefined_references -------------------------------------------------
+
+def test_undefined_references_returns_valid_result(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1\ny <- x + 1\n")
+    r = run_static_check("check_undefined_references", tmp_path)
+    assert r["status"] in ("pass", "fail", "not_implemented")
+
+
+def test_undefined_references_pass_self_contained(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "set.seed(42)\nx <- rnorm(100)\nresult <- mean(x)\nprint(result)\n"
+    )
+    assert run_static_check("check_undefined_references", tmp_path)["status"] == "pass"
+
+
+def test_undefined_references_fail_typo(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "proper_name <- 42\nresult <- propper_name + 1\n"
+    )
+    r = run_static_check("check_undefined_references", tmp_path)
+    assert r["status"] == "fail"
+    assert any("propper_name" in e["note"] for e in r["evidence"])
+
+
+def test_undefined_references_cross_file(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "helpers.R").write_text("my_helper <- function(x) x * 2\n")
+    (tmp_path / "main.R").write_text("result <- my_helper(10)\n")
+    assert run_static_check("check_undefined_references", tmp_path)["status"] == "pass"
+
+
+# check_function_signatures --------------------------------------------------
+
+def test_function_signatures_returns_valid_result(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1\n")
+    r = run_static_check("check_function_signatures", tmp_path)
+    assert r["status"] in ("pass", "fail", "not_implemented")
+
+
+def test_function_signatures_pass_correct_call(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text("add <- function(x, y) x + y\nresult <- add(1, 2)\n")
+    assert run_static_check("check_function_signatures", tmp_path)["status"] == "pass"
+
+
+def test_function_signatures_fail_unknown_named_arg(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "add <- function(x, y) x + y\nresult <- add(1, typo_arg=2)\n"
+    )
+    r = run_static_check("check_function_signatures", tmp_path)
+    assert r["status"] == "fail"
+    assert "typo_arg" in r["evidence"][0]["note"]
+
+
+def test_function_signatures_pass_dots_accepts_any(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "wrap <- function(x, ...) x\nresult <- wrap(1, anything=99, extra=TRUE)\n"
+    )
+    assert run_static_check("check_function_signatures", tmp_path)["status"] == "pass"
+
+
+def test_function_signatures_fail_too_many_positional(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text("sq <- function(x) x^2\nresult <- sq(1, 2, 3)\n")
+    assert run_static_check("check_function_signatures", tmp_path)["status"] == "fail"
+
+
+# check_dead_code ------------------------------------------------------------
+
+def test_dead_code_returns_valid_result(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1\n")
+    r = run_static_check("check_dead_code", tmp_path)
+    assert r["status"] in ("pass", "fail", "not_implemented")
+
+
+def test_dead_code_pass_all_called(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "helper <- function(x) x + 1\nresult <- helper(5)\n"
+    )
+    assert run_static_check("check_dead_code", tmp_path)["status"] == "pass"
+
+
+def test_dead_code_fail_unused_function(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "used_fn <- function(x) x + 1\n"
+        "orphan_fn <- function(z) z * 0\n"
+        "result <- used_fn(5)\n"
+    )
+    r = run_static_check("check_dead_code", tmp_path)
+    assert r["status"] == "fail"
+    assert any("orphan_fn" in e["note"] for e in r["evidence"])
+
+
+def test_dead_code_pass_higher_order(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "transform <- function(x) x * 2\nresults <- lapply(data, transform)\n"
+    )
+    assert run_static_check("check_dead_code", tmp_path)["status"] == "pass"
+
+
+# check_loop_invariants ------------------------------------------------------
+
+def test_loop_invariants_returns_valid_result(tmp_path):
+    (tmp_path / "a.R").write_text("x <- 1\n")
+    r = run_static_check("check_loop_invariants", tmp_path)
+    assert r["status"] in ("pass", "fail", "not_implemented")
+
+
+def test_loop_invariants_pass_size_outside_loop(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "n <- length(data)\nfor (i in 1:n) { process(data[[i]]) }\n"
+    )
+    assert run_static_check("check_loop_invariants", tmp_path)["status"] == "pass"
+
+
+def test_loop_invariants_fail_invariant_inside_loop(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text(
+        "for (i in 1:100) {\n"
+        "  n <- length(data)\n"
+        "  process(data[i], n)\n"
+        "}\n"
+    )
+    r = run_static_check("check_loop_invariants", tmp_path)
+    assert r["status"] == "fail"
+    assert any("length" in e["note"] for e in r["evidence"])
+
+
+def test_loop_invariants_pass_no_loops(tmp_path):
+    if not _ts_available():
+        return
+    (tmp_path / "a.R").write_text("n <- length(x)\nresult <- n * 2\n")
+    assert run_static_check("check_loop_invariants", tmp_path)["status"] == "pass"

@@ -74,6 +74,11 @@ orchestrator = [
 pdf = [
     "pdfminer.six>=20231228",
 ]
+# Optional: AST-based static checks via tree-sitter. Pin both packages together.
+ast = [
+    "tree-sitter-languages>=1.10",
+    "tree-sitter>=0.21,<0.22",
+]
 
 [project.urls]
 Homepage = "https://github.com/sistm/AI4Reproducibility"
@@ -131,9 +136,10 @@ addopts = "-ra --strict-markers"
 pythonpath = ["."]
 norecursedirs = ["tests/fixtures"]
 filterwarnings = [
-    # pymupdf uses SWIG-generated C bindings; these DeprecationWarnings are an
-    # upstream issue in the SWIG runtime and are not actionable from this codebase.
+    # pymupdf uses SWIG-generated C bindings; upstream issue, not actionable here.
     "ignore:builtin type.*has no __module__:DeprecationWarning",
+    # tree-sitter 0.21 API shim emits a FutureWarning about Language(path, name).
+    "ignore:Language.*is deprecated:FutureWarning",
 ]
 
 [tool.mypy]
