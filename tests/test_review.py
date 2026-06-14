@@ -139,7 +139,7 @@ def test_partial_when_upstream_degraded(tmp_path):
     rm = run_review("p", root=tmp_path, complete_fn=_backend())
     assert rm["assessment_status"] == "partial"
     assert rm["upstream_status"]["kbe"]["status"] == "partial"
-    assert rm["verdict"] in {"ACCEPT", "MINOR REVISION", "MAJOR REVISION", "REJECT"}
+    assert rm["verdict"] in {"ACCEPT", "MINOR REVISION", "MAJOR REVISION"}
 
 
 def test_all_upstream_failed_is_deterministic_no_model(tmp_path):
@@ -242,13 +242,13 @@ def test_invalid_verdict_is_coerced(tmp_path):
     _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
     bad = json.dumps({"risk_score": 10, "risk_level": "LOW", "verdict": "LGTM", "issues": {}, "required_changes": []})
     rm = run_review("p", root=tmp_path, complete_fn=_backend(core=bad))
-    assert rm["verdict"] in {"ACCEPT", "MINOR REVISION", "MAJOR REVISION", "REJECT"}
+    assert rm["verdict"] in {"ACCEPT", "MINOR REVISION", "MAJOR REVISION"}
     assert set(rm["issues"]) == {"critical", "major", "minor", "suggestions"}
 
 
 def test_risk_level_derived_from_score_when_missing(tmp_path):
     _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
-    core = json.dumps({"risk_score": 80, "verdict": "REJECT", "issues": {}, "required_changes": []})
+    core = json.dumps({"risk_score": 80, "verdict": "MAJOR REVISION", "issues": {}, "required_changes": []})
     rm = run_review("p", root=tmp_path, complete_fn=_backend(core=core))
     assert rm["risk_level"] == "CRITICAL"  # 80 -> CRITICAL
 
@@ -325,9 +325,9 @@ def test_md_validation_preserves_recovery_note(tmp_path, monkeypatch):
     from tools.orchestrator import review as review_mod
 
     _seed(tmp_path, "p", {"status": "success", "paper_title": "T"}, {"status": "success"})
-    malformed = '{"risk_score": 30, "verdict": "REJECT"'  # malformed
+    malformed = '{"risk_score": 30, "verdict": "MAJOR REVISION"'  # malformed
     repaired = {
-        "risk_score": 30, "risk_level": "MEDIUM", "verdict": "REJECT",
+        "risk_score": 30, "risk_level": "MEDIUM", "verdict": "MAJOR REVISION",
         "issues": {"critical": [], "major": [], "minor": [], "suggestions": []},
         "required_changes": [],
     }
@@ -1012,7 +1012,7 @@ def test_final_pass_partial_rm_rejected(tmp_path):
         "addressed_concerns": [{"id": "K1", "resolution": "incorporated",
                                 "reason": "x"}],
     })
-    incomplete = {"verdict": "REJECT", "risk_score": 95}  # missing 8 keys
+    incomplete = {"verdict": "MAJOR REVISION", "risk_score": 95}  # missing 8 keys
     revisions_response = json.dumps({
         "revised_risk_matrix": incomplete,
         "revised_markdown_files": None,
@@ -2129,3 +2129,54 @@ def test_checklist_prompt_no_block_when_verdicts_none():
     from tools.orchestrator.review import _checklist_prompt
     prompt = _checklist_prompt("ctx", "complete")
     assert "Pre-determined verdicts" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# patch 0102 - drop REJECT verdict + coherence clamp
+# ---------------------------------------------------------------------------
+
+def test_reject_remapped_to_major_revision(tmp_path):
+    """Model emitting REJECT must be remapped to MAJOR REVISION."""
+    _seed(tmp_path, "rej", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    core = json.dumps({
+        "risk_score": 90, "verdict": "REJECT",
+        "issues": {}, "required_changes": [],
+    })
+    rm = run_review("rej", root=tmp_path, complete_fn=_backend(core=core))
+    assert rm["verdict"] == "MAJOR REVISION"
+
+
+def test_accept_score_clamped_to_35(tmp_path):
+    """ACCEPT + risk_score=80 must be clamped to <=35."""
+    _seed(tmp_path, "acc", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    core = json.dumps({
+        "risk_score": 80, "verdict": "ACCEPT",
+        "issues": {}, "required_changes": [],
+    })
+    rm = run_review("acc", root=tmp_path, complete_fn=_backend(core=core))
+    assert rm["verdict"] == "ACCEPT"
+    assert rm["risk_score"] <= 35
+
+
+def test_major_revision_score_clamped_to_40(tmp_path):
+    """MAJOR REVISION + risk_score=5 must be clamped to >=40."""
+    _seed(tmp_path, "maj", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    core = json.dumps({
+        "risk_score": 5, "verdict": "MAJOR REVISION",
+        "issues": {}, "required_changes": [],
+    })
+    rm = run_review("maj", root=tmp_path, complete_fn=_backend(core=core))
+    assert rm["verdict"] == "MAJOR REVISION"
+    assert rm["risk_score"] >= 40
+
+
+def test_minor_revision_score_clamped_to_15(tmp_path):
+    """MINOR REVISION + risk_score=2 must be clamped to >=15."""
+    _seed(tmp_path, "min", {"status": "success", "paper_title": "T"}, {"status": "success"})
+    core = json.dumps({
+        "risk_score": 2, "verdict": "MINOR REVISION",
+        "issues": {}, "required_changes": [],
+    })
+    rm = run_review("min", root=tmp_path, complete_fn=_backend(core=core))
+    assert rm["verdict"] == "MINOR REVISION"
+    assert rm["risk_score"] >= 15

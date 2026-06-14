@@ -61,13 +61,12 @@ _DIFFABLE_RM_KEYS = (
     "assessment_status",
 )
 
-_VERDICTS = {"ACCEPT", "MINOR REVISION", "MAJOR REVISION", "REJECT"}
+_VERDICTS = {"ACCEPT", "MINOR REVISION", "MAJOR REVISION"}
 
 # First pass: the word "verdict" (case-insensitive) followed within ~150 chars
-# (possibly crossing a heading + blank-line gap) by one of the four verdict
-# tokens. Non-greedy so it picks the closest pairing. Case-sensitive on the
-# token to match the Synthesiser's emit-in-caps convention; lowercase tokens
-# are still accepted and normalised by the caller.
+# (possibly crossing a heading + blank-line gap) by one of the verdict tokens.
+# REJECT is kept in the regex to detect legacy narratives; _normalise_verdict
+# remaps it to MAJOR REVISION before any set-membership check.
 _VERDICT_NEAR_KEYWORD = re.compile(
     r"(?i)verdict\b.{0,150}?\b(ACCEPT|MINOR\s+REVISION|MAJOR\s+REVISION|REJECT)\b",
     re.DOTALL,
@@ -80,8 +79,11 @@ _BOLD_VERDICT = re.compile(
 
 
 def _normalise_verdict(raw: str) -> str:
-    """Collapse whitespace inside the verdict token to a single space, upper-case it."""
-    return re.sub(r"\s+", " ", raw).strip().upper()
+    """Collapse whitespace; remap legacy REJECT to MAJOR REVISION."""
+    v = re.sub(r"\s+", " ", raw).strip().upper()
+    if v == "REJECT":
+        v = "MAJOR REVISION"
+    return v
 
 
 def _extract_verdict_from_md(text: str) -> str | None:

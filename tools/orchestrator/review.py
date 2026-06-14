@@ -48,7 +48,7 @@ from tools.orchestrator.critique import run_critique
 from tools.orchestrator.llm import CompleteFn, run_agent, with_retry_policy
 from tools.orchestrator.reconcile import reconcile_review, snapshot_draft
 
-_VERDICTS = {"ACCEPT", "MINOR REVISION", "MAJOR REVISION", "REJECT"}
+_VERDICTS = {"ACCEPT", "MINOR REVISION", "MAJOR REVISION"}
 _RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 _FAILED_STATUSES = {"failed", "missing", "unreadable", "unknown"}
 
@@ -85,7 +85,7 @@ def _has_heading(text: str) -> bool:
 _MD_VALIDATORS: dict[str, tuple[Any, str]] = {
     "final_review.md": (
         _has_verdict_token,
-        "missing verdict token (ACCEPT|MINOR REVISION|MAJOR REVISION|REJECT)",
+        "missing verdict token (ACCEPT|MINOR REVISION|MAJOR REVISION)",
     ),
     "checklist.md": (
         _has_checklist_token,
@@ -710,7 +710,7 @@ def _risk_prompt(
         f"{_ER_RISK_RULES}\n"
         'Return ONLY a single JSON object: {"risk_score": <int 0-100, higher means '
         'less reproducible>, "risk_level": "LOW|MEDIUM|HIGH|CRITICAL", "verdict": '
-        '"ACCEPT|MINOR REVISION|MAJOR REVISION|REJECT", "issues": {"critical": [], '
+        '"ACCEPT|MINOR REVISION|MAJOR REVISION", "issues": {"critical": [], '
         '"major": [], "minor": [], "suggestions": []}, "required_changes": []} — no '
         "prose, no markdown fences. Each issue is an object with id, description and "
         "an evidence file path under ai4r/<review_title>/.\n\n"
@@ -920,6 +920,9 @@ def _run_call(user: str, model: str, complete_fn: CompleteFn | None) -> str:
 
 def _normalise_core(core: dict[str, Any]) -> dict[str, Any]:
     verdict = core.get("verdict")
+    # REJECT is no longer a valid verdict; remap to strongest valid verdict.
+    if verdict == "REJECT":
+        verdict = "MAJOR REVISION"
     verdict = verdict if verdict in _VERDICTS else "MAJOR REVISION"
 
     score = core.get("risk_score")
@@ -936,6 +939,14 @@ def _normalise_core(core: dict[str, Any]) -> dict[str, Any]:
     score = max(0, min(100, score))
     if level is None:
         level = _level_from_score(score)
+
+    # Coherence clamp: enforce verdict <-> risk_score consistency (Invariant 4).
+    # Overlapping ranges allow borderline cases; the clamp only fires when the
+    # model emits a clearly inconsistent pair (e.g. ACCEPT with risk=80).
+    _SCORE_FLOOR = {"ACCEPT": 0,  "MINOR REVISION": 15, "MAJOR REVISION": 40}
+    _SCORE_CEIL  = {"ACCEPT": 35, "MINOR REVISION": 60, "MAJOR REVISION": 100}
+    score = max(_SCORE_FLOOR[verdict], min(_SCORE_CEIL[verdict], score))
+    level = _level_from_score(score)  # re-derive after clamp
 
     issues = core.get("issues")
     issues = issues if isinstance(issues, dict) else {}

@@ -31,7 +31,7 @@ from tools.orchestrator.reconcile import (
     ("## Verdict and Justification\n\n**MAJOR REVISION** — justified by ...",
      "MAJOR REVISION"),
     # Fallback: standalone bold token with no nearby "Verdict" keyword.
-    ("# Final Review\n\nWe propose **REJECT** for this submission.", "REJECT"),
+    ("# Final Review\n\nWe propose **REJECT** for this submission.", "MAJOR REVISION"),  # REJECT remapped
     # Case-insensitive verdict-keyword, normalised to canonical caps.
     ("**verdict:** accept", "ACCEPT"),
     # Multi-line gap: keyword and token straddle a blank line.
@@ -39,7 +39,7 @@ from tools.orchestrator.reconcile import (
     # Multiple "verdict" mentions: regex skips the first if no token follows,
     # matches the second.
     ("The verdict is deferred until next round.\n\n## Verdict\n\n**REJECT**",
-     "REJECT"),
+     "MAJOR REVISION"),  # REJECT remapped
     # No verdict anywhere.
     ("# Final Review\n\nNo verdict yet.", None),
     ("", None),
@@ -158,7 +158,7 @@ def test_verdict_invalid_rm_value_skips_check():
 
 def test_verdict_does_not_mutate_caller_dict():
     """Reconciliation returns a new dict on mismatch — caller's rm unchanged."""
-    rm = _bare_rm(verdict="REJECT")
+    rm = _bare_rm(verdict="MAJOR REVISION")
     md = {"final_review.md": "**ACCEPT**"}
     out_rm, _ = _check_verdict_consistency(rm, md)
     assert rm["assessment_status"] == "complete"  # original untouched
@@ -354,7 +354,7 @@ def test_snapshot_is_deep_copy():
     snap = snapshot_draft(rm, md)
     # Mutate original
     rm["issues"]["critical"].append({"id": "C2"})
-    rm["verdict"] = "REJECT"
+    rm["verdict"] = "MAJOR REVISION"  # was REJECT pre-0102; mutate to check snapshot independence
     md["final_review.md"] = "mutated text"
     # Snapshot unaffected
     assert snap["rm"]["issues"]["critical"] == [{"id": "C1"}]
