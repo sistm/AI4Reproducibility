@@ -27,13 +27,38 @@ from ._common import CheckResult, iter_source_files, read_text_safe, relpath
 # ---------------------------------------------------------------------------
 # Optional import -- graceful degradation when tree-sitter is absent
 # ---------------------------------------------------------------------------
+# Modern tree-sitter initialisation (no warning at any version)
+#
+# tree-sitter-languages bundles every grammar as a C shared library and
+# exposes them via a Cython extension that uses the *old* Language(path,name)
+# constructor — deprecated in tree-sitter 0.21 and raising FutureWarning.
+#
+# Instead we call the bundled C symbol directly (tree_sitter_r()) via ctypes
+# to obtain a raw TSLanguage* pointer, then wrap it in a PyCapsule named
+# "tree_sitter.Language" — exactly what modern tree-sitter Language() expects.
+# This works cleanly from tree-sitter 0.22 onwards without any warnings.
+# ---------------------------------------------------------------------------
 
 try:
-    import warnings as _w
-    with _w.catch_warnings():
-        _w.simplefilter("ignore")
-        from tree_sitter_languages import get_parser as _get_parser  # type: ignore[import]
-    _PARSER = _get_parser("r")
+    import ctypes as _ct
+    from pathlib import Path as _Path
+    import tree_sitter_languages as _tsl  # type: ignore[import]
+    from tree_sitter import Language as _Language, Parser as _Parser
+
+    # Locate the bundled shared library that contains all grammars.
+    _so = _Path(_tsl.__file__).parent / "languages.so"
+    _lib = _ct.CDLL(str(_so))
+    _lib.tree_sitter_r.restype = _ct.c_void_p
+    _lib.tree_sitter_r.argtypes = []
+
+    # Wrap the raw C pointer in the PyCapsule name tree-sitter 0.22+ expects.
+    _PyCapsule_New = _ct.pythonapi.PyCapsule_New
+    _PyCapsule_New.restype = _ct.py_object
+    _PyCapsule_New.argtypes = [_ct.c_void_p, _ct.c_char_p, _ct.c_void_p]
+    _capsule = _PyCapsule_New(_lib.tree_sitter_r(), b"tree_sitter.Language", None)
+
+    _R_LANGUAGE = _Language(_capsule)
+    _PARSER = _Parser(_R_LANGUAGE)
     _AVAILABLE = True
 except Exception:
     _AVAILABLE = False
@@ -45,9 +70,8 @@ def _not_impl() -> CheckResult:
         tool_id="check_undefined_references",
         status="not_implemented",
         summary=(
-            "AST checks require 'tree-sitter-languages' "
-            "(pip install tree-sitter-languages 'tree-sitter==0.21.3'). "
-            "Install it and re-run."
+            "AST checks require 'tree-sitter-languages' and 'tree-sitter>=0.22'. "
+            "Install with: pip install tree-sitter-languages 'tree-sitter>=0.22'"
         ),
         evidence=[],
         metadata={"reason": "tree-sitter-languages not available"},
@@ -67,10 +91,7 @@ def _not_impl_for(tool_id: str) -> CheckResult:
 
 def _parse(source: bytes) -> Any:
     try:
-        import warnings as _w
-        with _w.catch_warnings():
-            _w.simplefilter("ignore")
-            return _PARSER.parse(source)
+        return _PARSER.parse(source)
     except Exception:
         return None
 
