@@ -54,11 +54,16 @@ def test_every_check_has_a_key(tmp_path):
     assert set(ev) == set(PATTERNS)
 
 
-def test_bounded_by_max_chars(tmp_path):
+def test_bounded_by_per_item_budget(tmp_path):
+    """Each item uses its severity-derived budget, not the max_chars fallback."""
+    from tools.orchestrator.stat_evidence import _ITEM_BUDGETS, _SEVERITY_BUDGETS
     assets = tmp_path / "assets"
     _write(assets, "many.R", "\n".join("t.test(x)" for _ in range(2000)))
-    ev = gather_stat_evidence(assets, max_chars=500)
-    assert len(ev["cqv-stat-test-assumptions"]) <= 600  # cap + one final block tolerance
+    ev = gather_stat_evidence(assets)
+    item_id = "cqv-stat-test-assumptions"
+    expected_cap = _ITEM_BUDGETS.get(item_id, 8_000)
+    assert len(ev[item_id]) <= expected_cap + 500
+    assert expected_cap == _SEVERITY_BUDGETS["major"]  # major -> 6000
 
 
 def test_non_source_and_unreadable_files_skipped(tmp_path):
@@ -113,10 +118,11 @@ def test_hand_rolled_test_statistics_detected(tmp_path):
 
 def test_oversized_block_is_truncated_not_dropped(tmp_path):
     assets = tmp_path / "assets"
-    code = "\n".join(f"Delta.Bonf = alpha / m  # threshold line {i}" for i in range(100))
+    # 500 lines * ~47 chars ~= 23 500 chars -- well above the 6 000-char major budget
+    code = "\n".join(f"Delta.Bonf = alpha / m  # threshold line {i}" for i in range(500))
     _write(assets, "a.R", code + "\n")
-    # one merged block far exceeds this tiny budget; old code dropped it -> ""
-    ev = gather_stat_evidence(assets, max_chars=300)["cqv-stat-multiple-testing"]
+    # one merged block far exceeds the per-item budget; must be truncated, not dropped
+    ev = gather_stat_evidence(assets)["cqv-stat-multiple-testing"]
     assert ev, "oversized block must be truncated, not dropped to empty"
     assert "Delta.Bonf" in ev
     assert "truncated" in ev

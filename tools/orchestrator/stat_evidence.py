@@ -28,6 +28,31 @@ _SOURCE_SUFFIXES = {".r", ".py", ".rmd", ".qmd"}
 _MAX_FILE_BYTES = 1_000_000  # skip files larger than this (data dumps, etc.)
 _MIN_BLOCK_CHARS = 200  # don't bother appending a truncated sliver smaller than this
 
+# Evidence budget (chars) by check severity.  Critical checks get the full
+# budget; suggestion-level checks rarely need large windows.
+_SEVERITY_BUDGETS: dict[str, int] = {
+    "critical":   8_000,
+    "major":      6_000,
+    "minor":      4_000,
+    "suggestion": 3_000,
+}
+_DEFAULT_BUDGET = 8_000
+
+
+def _build_item_budgets() -> dict[str, int]:
+    """Derive per-item char budget from STAT_CHECKS at import time."""
+    try:
+        from tools.orchestrator.stat_judges import STAT_CHECKS
+        return {
+            c.item_id: _SEVERITY_BUDGETS.get(c.severity, _DEFAULT_BUDGET)
+            for c in STAT_CHECKS
+        }
+    except Exception:  # pragma: no cover
+        return {}
+
+
+_ITEM_BUDGETS: dict[str, int] = _build_item_budgets()
+
 
 def _patterns(*raw: str) -> list[re.Pattern[str]]:
     # Case-insensitive: method names and idioms appear capitalised in real code
@@ -263,20 +288,23 @@ def _merge_windows(hits: list[int], window: int, n_lines: int) -> list[tuple[int
 
 
 def gather_stat_evidence(
-    assets_dir: Path, *, window: int = 3, max_chars: int = 8000
+    assets_dir: Path, *, window: int = 3, max_chars: int = _DEFAULT_BUDGET
 ) -> dict[str, str]:
     """Return ``{item_id: code-evidence}`` for each statistical-validity check.
 
     Evidence is matching call-sites plus ``window`` lines of context, labelled
-    ``# <relpath>:<start>-<end>``. Capped at ``max_chars`` per check; an oversized
-    block is truncated (not dropped) so a large implementation block cannot lose
-    the budget to small comment/header snippets. A check with no matches gets
-    ``""`` (⇒ not_applicable downstream). Never raises.
+    ``# <relpath>:<start>-<end>``. Capped per check by ``_ITEM_BUDGETS``
+    (derived from check severity: critical 8 000, major 6 000, minor 4 000,
+    suggestion 3 000 chars); ``max_chars`` is the fallback for any item not in
+    the budget map. An oversized block is truncated (not dropped) so a large
+    implementation block cannot lose the budget to small comment/header snippets.
+    A check with no matches gets ``""`` (=> not_applicable downstream). Never raises.
     """
     files = [(p, _read_lines(p)) for p in _iter_source_files(assets_dir)]
     evidence: dict[str, str] = {}
 
     for item_id, patterns in PATTERNS.items():
+        cap = _ITEM_BUDGETS.get(item_id, max_chars)
         blocks: list[str] = []
         total = 0
         for path, lines in files:
@@ -292,20 +320,20 @@ def gather_stat_evidence(
             for start, end in _merge_windows(hits, window, len(lines)):
                 body = "\n".join(f"{n + 1}: {lines[n]}" for n in range(start, end))
                 block = f"# {label}:{start + 1}-{end}\n{body}"
-                if total + len(block) > max_chars:
+                if total + len(block) > cap:
                     # Truncate rather than drop: a large implementation block is
                     # usually the most relevant evidence and must not lose the
-                    # budget to small comment/header snippets (bimj.202400278 —
+                    # budget to small comment/header snippets (bimj.202400278 --
                     # the MTP-correction block was dropped whole, which starved
                     # the multiple-testing judge into a false "no correction").
-                    remaining = max_chars - total
+                    remaining = cap - total
                     if remaining >= _MIN_BLOCK_CHARS:
-                        blocks.append(block[:remaining].rstrip() + "\n# … (truncated)")
-                    total = max_chars
+                        blocks.append(block[:remaining].rstrip() + "\n# ... (truncated)")
+                    total = cap
                     break
                 blocks.append(block)
                 total += len(block) + 2
-            if total >= max_chars:
+            if total >= cap:
                 break
         evidence[item_id] = "\n\n".join(blocks)
 
