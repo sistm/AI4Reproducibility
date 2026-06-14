@@ -1,74 +1,250 @@
-# AI4reproducibility
+# AI4Reproducibility
 
-Authors : Jad El Karchi; <jad.el-karchi@u-bordeaux.fr>
+**Lead developer:** Boris P. Hejblum -- [boris.hejblum@u-bordeaux.fr](mailto:boris.hejblum@u-bordeaux.fr)
+**Developer:** Jad El Karchi -- [jad.el-karchi@u-bordeaux.fr](mailto:jad.el-karchi@u-bordeaux.fr)
+
+Inserm UMR 1219 BPH / SISTM team -- University of Bordeaux & Inria
 
 ![Python](https://img.shields.io/badge/Python-3.12+-blue)
-![Docker](https://img.shields.io/badge/Docker-29.2.1+-blue)
+![Tests](https://img.shields.io/badge/tests-653%20passing-brightgreen)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
-> AI4Reproducibility is a framework for building agentic AI systems that automatically evaluate the reproducibility of scientific papers.
+> **AI4Reproducibility** is an agentic pipeline for automated reproducibility
+> review of scientific paper submissions. It reads a manuscript PDF and its
+> associated code supplement, and produces a structured audit report with a
+> three-level verdict (Accept, Minor Revision, Major Revision).
 
-## Problem
+---
 
-Scientific reproducibility is one of the most important pillars of research integrity. However, verifying reproducibility during the peer-review process is often:
+## Overview
 
-- Time-consuming
-- Subjective
-- Inconsistent across reviewers
-- Difficult to standardize
+Verifying reproducibility during peer review is time-consuming, subjective,
+and hard to standardise. AI4Reproducibility addresses this by running four
+specialised agents in sequence -- each with a clearly bounded role -- to
+produce a comprehensive, evidence-anchored assessment.
 
-## Goal
+The pipeline is designed for biostatistics and computational biology
+submissions but is domain-adaptable through its YAML-driven rubric system.
 
-The project aims mainly to create a pipeline of automated AI agents designed to evaluate the reproducibility of scientific paper submissions. This pipeline provides a detailed assessment of each major criterion involved in determining the research quality and reproducibility standards required for the acceptance of a submitted paper.
+---
+
+## Pipeline
+
+```
+  paper.pdf --------------------------------+
+  code supplement ----------------+         |
+                                  |         |
+                      +-----------+--+  +---+----------+
+                      |  CQV         |  |  KBE        |  <- Stage 1 (parallel)
+                      |  Code audit  |  |  Paper read |
+                      +-------+------+  +------+-------+
+                              |                |
+                      +-------+----------------+
+                      |  ER  (optional)              <- Stage 2
+                      |  Experimental run
+                      +-------+-------------------------
+                              |
+                      +-------+------+
+                      |  Review      |               <- Stage 3
+                      |  Synthesis   |
+                      +-------+------+
+                              |
+              +---------------+----------------+
+              |  final_review.md               |
+              |  exhaustive_audit_report.md    |
+              |  checklist.md                  |
+              |  risk_matrix.json              |
+              +--------------------------------+
+```
+
+**Stage 1 -- KBE and CQV run in parallel with isolated contexts** (neither
+can see the other's inputs or outputs). This prevents the code reviewer
+from being biased by what the paper claims, and vice versa.
+
+**Stage 2 -- ER** is optional (`--er-enabled`). It executes the submission
+code in an isolated environment and compares produced figures and tables
+against the manuscript references using perceptual hashing.
+
+**Stage 3 -- Review** sees all upstream outputs at once and synthesises them
+into a final verdict. Verdicts are one of: **Accept**, **Minor Revision**,
+**Major Revision**, or **Unable to Assess**.
+
+---
+
+## Agents
+
+### KBE -- Knowledge-Base Extraction
+
+Reads the manuscript PDF; all other agents are forbidden from doing so.
+Extracts the statistical methods, assumptions, and data-generation
+processes. Identifies specific *reproduction targets*: the figures, tables,
+and headline numerical results that must be reproduced. This identification
+drives the optional ER comparison step.
+
+### CQV -- Code-Quality Verification
+
+Never reads the manuscript. Analyses the code supplement through three
+internal passes:
+
+1. **Stat-judge pre-pass** -- 16 bounded LLM calls, each evaluating a
+   specific code-quality dimension (NA handling, multiple-testing correction,
+   CI construction, deprecated packages, etc.) against a curated rubric and
+   targeted evidence snippets extracted from the source code.
+2. **Static checks** -- 33 deterministic checks implemented in Python
+   (AST analysis, regex heuristics, file-layout checks). No LLM involved.
+   Covers: reproducibility setup, seed hygiene, dangerous patterns, import
+   completeness, dead code, loop invariants, undefined references, and more.
+3. **Main LLM audit** -- a model call with file-reading tools that produces
+   the structured `cqv_output.json`. Stat-judge verdicts are injected as
+   pre-determined answers so the model does not re-debate them.
+
+After the model returns, each cited line is enriched with +-5 lines of
+source context (evidence rehydration) so the Review agent can cite code
+precisely.
+
+### ER -- Experimental Run *(optional)*
+
+Executes the submission code in a Docker container, collects produced
+outputs, and compares them against manuscript reference images using
+perceptual hashing. Populates dynamic checklist items that CQV cannot
+evaluate without running the code.
+
+Enable with `--er-enabled` on the command line.
+
+### Review -- Synthesis
+
+Sees all upstream outputs simultaneously. Deterministically wires ER
+comparison results to checklist items before the LLM call (so the model
+cannot override them), then generates the four-file deliverable:
+`final_review.md`, `exhaustive_audit_report.md`, `checklist.md`,
+`risk_matrix.json`. The risk score and verdict are post-processed to
+enforce mutual consistency (a low risk score cannot accompany a Major
+Revision verdict, and vice versa).
+
+---
 
 ## Requirements
 
-To run this project, ensure the following dependencies are installed:
+| Dependency | Required | Notes |
+|---|---|---|
+| Python >= 3.12 | Yes | |
+| LLM API key | Yes | Configured via env vars (LiteLLM router) |
+| Docker >= 29 | Optional | Only for Stage 2 ER (`--er-enabled`) |
+| `tree-sitter-languages` + `tree-sitter==0.21.*` | Optional | Enables 4 AST-based static checks; other 29 still run without it |
 
-- **Python ≥ 3.12**
-- **Docker ≥ 29.2.1**
-
-Docker is required to create isolated and reproducible execution environments for running experiment validation pipelines.
-
-## Repository Structure
+Install the package and its dependencies:
 
 ```bash
-ai4reproducibility/
-│
-├── CHECKLIST.md # Reproducibility evaluation criteria.
-│
-├── LOGIC.md # Description of the agentic evaluation pipeline.
-│
-├── agents/ # Specialized agents for different analysis tasks.
-│
-├── tools/ # External tools used by the agents (code execution, dataset checks, etc.)
-│
-└── papers/ # Sample paper evaluations and reports.
-│
-└── app/ # simple web application implementing the pipeline with a user friendly interface
-│
-└── assets/ # images/media content   
+pip install -e ".[pdf]"
+# Optional AST checks:
+pip install tree-sitter-languages "tree-sitter>=0.21,<0.22"
 ```
 
-*see [LOGIC.md](./LOGIC.md) for the architecture overview*
+---
 
-# Method
+## Usage
 
-The system uses a multi-agent architecture where each agent specializes in evaluating specific aspects of the paper.
+```bash
+# 1. Place the manuscript and code supplement in the run directory
+mkdir -p ai4r/my-paper/input
+cp manuscript.pdf ai4r/my-paper/input/paper.pdf
+cp code_supplement.zip ai4r/my-paper/input/assets/
 
-- **Knowledge Extraction Agent (KBE)** : Understand the context, and extract domain expertise from different assets of the submission, **excluding experiments & code**. Gives a detailed and global understanding on where the paper really stands in research.
+# 2. Run the pipeline
+python -m tools.orchestrator.run my-paper
 
-- **Code Quality Verification Agent (CQV)** : Code has an online repository exists, a clear README description, Code matches the described method, Dependencies are documented, Data accessibility, Licensing, versionning...
+# 3. With experimental run (requires Docker)
+python -m tools.orchestrator.run my-paper --er-enabled
 
-- **Experimental Agent (ER) -- Optional --** : Evaluates whether the experiments described in the paper can be reproduced based on the information provided. To support this process, the agent can create a fully isolated code execution environment using **Docker**, enabling safe and controlled validation of the experimental setup.
+# 4. Find results in
+ls ai4r/my-paper/review/
+#  final_review.md  exhaustive_audit_report.md  checklist.md  risk_matrix.json
+```
 
-- **Review Agent** : Uses the outputs produced by the previous agents together with the criteria defined in the `CHECKLIST.md`. Through iterative reasoning and self-critique, the agent evaluates the gathered evidence and generates a comprehensive reproducibility assessment.
+---
 
-This work is done using methods such as prompt alignment, tool creation, and system design to give access to paper reviewers to a reliable and deterministic valuation of the submitted paper.
+## Repository structure
 
-**N.B.**: The pipeline is designed to be **fail-safe**. Even if a paper is flagged or rejected by one agent, it is still passed to the subsequent agents for further analysis. This guarantees that a complete JSON analysis report is generated at the end of the pipeline.
+```
+ai4reproducibility/
+|
++-- CHECKLIST.md           # Rendered reproducibility rubric (24 items)
++-- CQV_CHECKLIST.md       # Rendered code-quality rubric (36 items)
++-- LOGIC.md               # Pipeline architecture reference
++-- checklist.yaml         # Source-of-truth reproducibility rubric
++-- cqv_checklist.yaml     # Source-of-truth code-quality rubric
+|
++-- agents/                # Agent skills and reference documents
+|   +-- knowledge-base-extraction/
+|   +-- code-quality-verification/
+|   +-- experimental-run/
+|   +-- critique/
+|   +-- review/
+|
++-- tools/
+|   +-- orchestrator/      # Pipeline orchestration
+|   |   +-- run.py         # Entry point
+|   |   +-- kbe.py         # KBE stage
+|   |   +-- cqv.py         # CQV stage (with rehydration)
+|   |   +-- er.py          # ER stage (optional)
+|   |   +-- review.py      # Review stage
+|   |   +-- stat_judges.py # 16 LLM stat/quality judges
+|   |   +-- stat_evidence.py # Evidence extraction for judges
+|   |   +-- reconcile.py   # Verdict reconciliation
+|   +-- cqv_agent/
+|   |   +-- static_checks/ # 33 deterministic checks
+|   |       +-- dispatch.py
+|   |       +-- check_r_ast.py      # AST checks (tree-sitter)
+|   |       +-- r_heuristics.py     # R-specific heuristics
+|   |       +-- heuristics_cross_lang.py
+|   |       +-- danger_patterns.py
+|   |       +-- file_inventory.py
+|   +-- tools.py           # Tool registry for agents
+|   +-- checklist_render.py # YAML -> Markdown + schema validation
+|
++-- tests/                 # 653 tests (pytest)
+|   +-- fixtures/
+|
++-- prepare_review.sh      # Pre-flight setup script
++-- validate_review.sh     # Post-flight validation script
++-- assets/                # Images and media
+```
 
-## AI : general rule
+---
 
-Prompts must be carefully designed to ensure deterministic and reliable outputs from the language model. Since language models are inherently probabilistic models, they can sometimes produce hallucinations or misinformation. Therefore, this tool should be used with moderation and human supervision to ensure consistent, coherent, and trustworthy results across paper evaluations.
+## Quality guarantees
 
-Finally, AI ouputs are required to follow structured output formats (e.g., JSON), enabling automated parsing, transparent evaluation metrics, and seamless integration into web applications.
+- **No LLM in the critical path of static checks** -- all 33 static checks
+  are deterministic Python. They cannot hallucinate.
+- **Evidence-anchored findings** -- every finding in the final report must
+  cite a file path and line number. Findings without evidence are not
+  permitted by the output schema.
+- **Fail-safe continuation** -- if one agent fails, the others still run.
+  Affected checklist items are marked *Unverified* rather than silently
+  passed or failed. A fully degraded run still produces a valid JSON with
+  `verdict: UNABLE_TO_ASSESS`.
+- **Bias separation** -- KBE and CQV run in isolated contexts. Neither can
+  see the other's inputs.
+- **Coherence enforcement** -- the final verdict and risk score are
+  post-processed to be mutually consistent.
+
+---
+
+## Citation
+
+If you use AI4Reproducibility in your research, please cite:
+
+```bibtex
+@software{ai4reproducibility2025,
+  title  = {{AI4Reproducibility}: Agentic Pipeline for Automated Reproducibility Review},
+  author = {Hejblum, Boris P. and El Karchi, Jad},
+  year   = {2025},
+  url    = {https://github.com/sistm/AI4Reproducibility}
+}
+```
+
+---
+
+## License
+
+Apache 2.0 -- see [`LICENSE.txt`](LICENSE.txt).

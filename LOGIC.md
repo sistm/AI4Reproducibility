@@ -1,390 +1,422 @@
 # LOGIC — AI4Reproducibility Architecture
 
-This document describes how the pipeline is wired together: what each agent
-does, what it reads and writes, how stages communicate, and what the failure
-modes are. It is the entry point for new contributors and the reference for
-existing ones when memory fades.
+This document is the technical reference for the pipeline: what each stage
+does, how data flows between them, what the internal structure of each agent
+looks like, and what happens when things go wrong.
 
+The orchestrator entry point is `tools/orchestrator/run.py`.
 The visual companion is [`assets/ai4re.logic.png`](assets/ai4re.logic.png).
-The orchestration prompt is [`.kilocode/workflows/ai4r.md`](.kilocode/workflows/ai4r.md).
 
 ---
 
-## 1. Pipeline at a glance
+## 1. Pipeline overview
 
-Four agents over two stages, separated by a soft execution boundary.
+The pipeline has **three sequential stages** separated by clear data contracts.
+Stages 1a and 1b (CQV and KBE) run in parallel and are intentionally isolated
+from each other. Stage 2 (ER) is optional. Stage 3 (Review) synthesises all
+upstream outputs into a final verdict.
 
 ```
-                      ┌──────────────── Stage 1 ─────────────────┐
-                      │                                          │
-   ╭─────────╮        │   ╭──────────╮      ╭──────────╮         │   ╭──────────╮
-   │ paper.  │───────▶│   │   KBE    │      │   CQV    │         │   │  Review  │
-   │ pdf     │        │   │  agent   │      │  agent   │         │   │  agent   │
-   ╰─────────╯        │   ╰────┬─────╯      ╰────┬─────╯         │   ╰────┬─────╯
-                      │        │                  │              │        │
-                      │   kbe_output.json   cqv_output.json      │   final_review.md
-   ╭─────────╮        │        │                  │              │   exhaustive_audit_report.md
-   │ code.zip│───────▶│        │             repo_analysis.md    │   checklist.md
-   ╰─────────╯        │        │                  │              │   risk_matrix.json
-                      │        ▼                  ▼              │        ▲
-                      │   ╭──────────────────────────────╮       │        │
-                      │   │   ER agent (optional / v0)   │───────┼────────┘
-                      │   │   er_output.json             │       │
-                      │   ╰──────────────────────────────╯       │
-                      └──────────────────────────────────────────┘
-                                                   ▲
-                                                   │
-                            ╭──────────────────────┴───────────────────╮
-                            │   prepare_review.sh    validate_review.sh │
-                            ╰───────────────────────────────────────────╯
+  INPUTS
+  ------
+  paper.pdf ------------------------------------------------+
+  code.zip / assets/ ------------------+                   |
+                                       |                   |
+                                       v                   v
+          +----------------------------+    +--------------------------+
+          |  STAGE 1a . CQV           |    |  STAGE 1b . KBE         |
+          |  Code Quality             |    |  Knowledge-Base         |
+          |  Verification             |    |  Extraction             |
+          |                           |    |                         |
+          |  (1) Stat-judge pre-pass  |    |  . PDF extraction       |
+          |    16 LLM calls           |    |  . Domain templates     |
+          |    (evidence -> verdict)  |    |  . Statistical methods  |
+          |                           |    |  . Reproduction targets |
+          |  (2) 33 static checks     |    |  . Assumptions          |
+          |    (deterministic: AST,   |    |                         |
+          |     regex, heuristics)    |    |  Reads the manuscript;  |
+          |                           |    |  CQV never does.        |
+          |  (3) Main LLM audit       |    +-------------+-----------+
+          |    (4 file-reading tools) |                  |
+          |                           |                  |
+          |  (4) Evidence rehydration |                  |
+          |    (+-5 lines of context  |                  |
+          |     per cited line)       |                  |
+          +-------------+-------------+                  |
+                        |                                |
+                cqv_output.json                  kbe_output.json
+                repo_analysis.md                 notes.md
+                        |                                |
+                        +----------------+---------------+
+                                         |
+                                         v
+          +----------------------------------------------+
+          |  STAGE 2 . ER  (optional: --er-enabled)      |
+          |  Experimental Run                            |
+          |                                              |
+          |  . Execute submission code in isolation      |
+          |  . Compare produced figures/tables against   |
+          |    manuscript references via pHash           |
+          |  . Populate dynamic checklist items          |
+          +--------------------+-------------------------+
+                               |
+                       er_output.json
+                               |
+                               v
+          +----------------------------------------------+
+          |  STAGE 3 . Review                            |
+          |                                              |
+          |  . Wire ER comparisons -> checklist items    |
+          |    (deterministic, before LLM call)          |
+          |  . LLM synthesis of all upstream evidence    |
+          |  . Reconcile verdict from narrative text     |
+          |  . Coherence clamp: verdict <-> risk_score   |
+          |  . Assemble four-file deliverable            |
+          +--------------------+-------------------------+
+                               |
+          +--------------------+-------------------------+
+          |  OUTPUT                                      |
+          |  final_review.md                            |
+          |  exhaustive_audit_report.md                 |
+          |  checklist.md                               |
+          |  risk_matrix.json                           |
+          |                                             |
+          |  verdict in {ACCEPT,                        |
+          |               MINOR REVISION,               |
+          |               MAJOR REVISION,               |
+          |               UNABLE_TO_ASSESS}             |
+          +---------------------------------------------+
 ```
 
-The flow is left-to-right. KBE and CQV run independently of each other (they
-read different inputs and never see each other's outputs). Their outputs
-fan into Review, which assembles the four-file deliverable. ER is optional
-and currently always skipped; when implemented it will sit between CQV and
-Review.
-
-Deterministic pre-flight and post-flight live in bash scripts called by the
-orchestrator at the boundaries.
+**Why KBE and CQV are isolated from each other:** if the same agent read
+both the paper and the code, its code judgment would be contaminated by
+what the paper claims, and vice versa. Subtask isolation enforces this
+as a hard boundary.
 
 ---
 
 ## 2. Per-submission file layout
 
-A single run materialises in one directory. The orchestrator creates this
-during pre-flight; agents read and write only within it.
+Every run materialises under one directory keyed to the review title.
 
 ```
 ai4r/<review_title>/
 ├── input/
-│   ├── paper.pdf           # the manuscript (caller-supplied)
-│   └── assets/             # extracted code supplement (zips extracted here)
+│   ├── paper.pdf               # manuscript (caller-supplied)
+│   └── assets/                 # code supplement (extracted from zip)
 ├── kbe/
-│   ├── kbe_output.json     # structured paper knowledge
-│   └── notes.md            # human-readable extraction notes
+│   ├── kbe_output.json         # structured paper knowledge
+│   └── notes.md                # human-readable extraction notes
 ├── cqv/
-│   ├── cqv_output.json     # code-quality audit + checklist evidence
-│   └── repo_analysis.md    # human-readable repo analysis
+│   ├── cqv_output.json         # code-quality audit + checklist evidence
+│   └── repo_analysis.md        # human-readable repo analysis
 ├── er/
-│   └── er_output.json      # {"status": "skipped"} by default
+│   └── er_output.json          # comparison results, or {"status":"skipped"}
 ├── review/
-│   ├── final_review.md             # reviewer-facing summary
-│   ├── exhaustive_audit_report.md  # full per-item findings
-│   ├── checklist.md                # populated checklist with evidence
-│   └── risk_matrix.json            # structured risk + verdict
+│   ├── final_review.md         # reviewer-facing narrative
+│   ├── exhaustive_audit_report.md   # full per-item findings with evidence
+│   ├── checklist.md            # populated checklist
+│   └── risk_matrix.json        # structured verdict + risk score
 └── logs/
-    └── workflow.log        # appended by every stage
+    └── workflow.log            # appended by every stage
 ```
 
-Every agent's output file is a stable contract — the validator
-(`validate_review.sh`) refuses to mark a run complete unless all eight
-files are present and the JSONs have their required top-level keys.
+The post-flight validator (`validate_review.sh`) treats any missing or
+structurally invalid output file as a hard failure.
 
 ---
 
-## 3. Agents
+## 3. Stages in detail
 
-### 3.1 KBE — Knowledge-Base Extraction
+### 3.1 Stage 1a — CQV (Code-Quality Verification)
 
-**Skill**: [`agents/knowledge-base-extraction/SKILL.md`](agents/knowledge-base-extraction/SKILL.md)
-**Reads**: `input/paper.pdf`, `agents/knowledge-base-extraction/biostat/*.md`
-**Writes**: `kbe/kbe_output.json`, `kbe/notes.md`
-**Tools**: `pdf2text`, `clean_pdf_text`
+**Entry point:** `tools/orchestrator/cqv.py :: run_cqv()`
+**Reads:** `input/assets/`
+**Writes:** `cqv/cqv_output.json`, `cqv/repo_analysis.md`
 
-KBE is the only agent allowed to read the manuscript. It parses the PDF,
-classifies the paper's domain (defaulting to biostat templates), and emits
-a structured representation: identified assumptions, statistical methods,
-data-generation processes, and the reproducibility gaps the agent flagged
-during reading.
+CQV runs four internal passes in sequence.
 
-The agent is also responsible for populating `paper_title` — the only
-field in the entire pipeline that originates from the manuscript text.
-Downstream agents (Review) copy this field verbatim; they never re-parse
-the PDF.
+#### Pass 1: Stat-judge pre-pass
 
-KBE also emits `reproduction_targets`: the specific figures, tables, and
-headline numerical results a reviewer must reproduce. Each is an object with
-`id`, `kind` (`figure`/`table`/`numerical_result`), `label`, `caption`,
-`what_it_shows`, `source_page`, and `priority`. Because KBE is the only stage
-that reads the manuscript, it owns the *identification* of what to reproduce;
-the ER stage reads this array to know which produced outputs to compare against
-the references. Malformed items (no label/description, unknown `kind`) are
-dropped or clamped during output assembly so ER can consume the field directly.
+`tools/orchestrator/stat_evidence.py` scans all `.R` / `.py` / `.Rmd`
+source files with per-check regex pattern sets, extracting the lines most
+relevant to each of the 16 code-quality / statistical LLM checks.
+`tools/orchestrator/stat_judges.py` then makes one bounded LLM call per
+check (rubric + evidence -> verdict). Evidence budgets are graduated by
+severity: critical 8 000 chars, major 6 000, minor 4 000, suggestion 3 000.
 
-### 3.2 CQV — Code-Quality Verification
+The 16 judges span seven categories:
 
-**Skill**: [`agents/code-quality-verification/SKILL.md`](agents/code-quality-verification/SKILL.md)
-**Reads**: `input/assets/`, `agents/code-quality-verification/references/*.md`
-**Writes**: `cqv/cqv_output.json`, `cqv/repo_analysis.md`
-**Tools**: `list_files`, `read_file`, `get_dependencies`, `run_static_check` (+ all entries in `tools/cqv_agent/static_checks/`)
+| Category | Checks |
+|---|---|
+| Statistical validity | test assumptions, MTP correction, data leakage, CI construction, representative sampling, post-hoc adjustment, model diagnostics |
+| Data handling | NA handling, explicit types, dataframe mutation |
+| Performance | redundant object copies |
+| Security | path sanitisation |
+| Documentation | docstring quality |
+| Testing | edge-case coverage, integration test coverage |
+| Dependencies | deprecated packages |
 
-CQV is forbidden from reading the manuscript. It inspects the extracted
-code supplement, runs the deterministic static checks (see §5), and emits
-a structured audit. The audit records per-checklist-item findings with
-file/line evidence, so the Review agent can cite specific code locations
-in its verdict.
+Verdicts (`pass` / `fail` / `not_applicable` / `unverified`) from this
+pass are injected as pre-determined answers into the main prompt so the
+main LLM does not re-debate them.
 
-CQV runs items from **both** `checklist.yaml` (the reproducibility rubric)
-and `cqv_checklist.yaml` (the code-quality rubric). The cross-reference is
-declared in `cqv_checklist.yaml` under the `also_enforces:` block — those
-items are CQV's responsibility even though they live in the reproducibility
-YAML.
+#### Pass 2: Static checks
 
-### 3.3 ER — Experimental Run (deferred)
+`tools/cqv_agent/static_checks/dispatch.py` routes 33 named checks across
+six modules. All 33 are fully implemented — no stubs remain:
 
-**Skill**: not yet defined
-**Reads**: `input/assets/`, planned execution plan from CQV
-**Writes**: `er/er_output.json`
-**Tools**: `launch_env`, `evaluate_results`, `create_file`
+| Module | Checks |
+|---|---|
+| `file_inventory.py` | archive layout, environment tooling, main entry point, output naming, file naming hygiene, readme, sessioninfo, python requirements, version pinning, test directory |
+| `r_heuristics.py` | set.seed scope, imports complete, function docs, unbounded loops, global state mutation |
+| `danger_patterns.py` | no absolute paths, no workspace clear, no auto-install, no eval/parse, no system calls, no hardcoded secrets, no attach, no arbitrary downloads, no unsafe deserialisation, path helpers |
+| `heuristics_cross_lang.py` | parse success, duplicate code blocks, growing vectors, error handling coverage |
+| `check_r_ast.py` (tree-sitter, optional) | undefined references, function signatures, dead code, loop invariants |
 
-ER is the only agent that would execute submission code, in a Docker
-container with reduced runtime parameters. It is currently always skipped
-— the workflow writes `{"status": "skipped"}` and proceeds. When
-implemented, ER will populate `dynamic` check_type items in both YAMLs
-(figure comparison, table comparison, full pipeline runs).
+Each check returns `pass`, `fail`, `warning`, or `not_implemented` (only
+for AST checks when the optional `tree-sitter-languages` dep is absent).
 
-### 3.4 Review
+#### Pass 3: Main LLM audit
 
-**Skill**: [`agents/review/SKILL.md`](agents/review/SKILL.md)
-**Reads**: `kbe/kbe_output.json`, `cqv/cqv_output.json`, `er/er_output.json`, `agents/review/references/full-audit-checklist.md`, `agents/review/assets/*-template.md`, `CHECKLIST.md`
-**Writes**: `review/final_review.md`, `review/exhaustive_audit_report.md`, `review/checklist.md`, `review/risk_matrix.json`
+The main CQV model call receives the static-check verdicts and the
+stat-judge verdicts as context, and uses four file-reading tools
+(`list_files`, `read_file`, `get_dependencies`, `extract_zip`) to
+produce the structured `repository_audit` JSON.
 
-Review is the only agent that sees all upstream outputs at once. It runs
-in the orchestrator's main context (no subtask isolation) because it needs
-that cross-cutting view.
+#### Pass 4: Evidence rehydration
 
-It does not execute code, does not parse the PDF, and does not re-run
-static checks — its job is judgment and synthesis. Findings cite evidence
-from upstream JSONs by file path; if an upstream output is degraded
-(`status: failed` or `partial`), Review marks affected checklist items as
-Unverified rather than inventing evidence.
-
-The output schema is locked: `risk_matrix.json` must contain `paper_id`,
-`paper_title`, `assessed_at`, `assessment_status`, `verdict`,
-`upstream_status`, plus optional `risk_score`, `risk_level`, `issues`,
-and `required_changes`. The verdict enum is
-`ACCEPT | MINOR REVISION | MAJOR REVISION | REJECT | UNABLE_TO_ASSESS`.
+After the model returns, `_rehydrate_evidence()` walks every
+`{file, line}` evidence object and splices in a +-5-line source context
+block with the cited line marked `>>`. This context travels to Review,
+where it anchors citations in the audit report without requiring Review
+to re-open files.
 
 ---
 
-## 4. Context-sharing policy
+### 3.2 Stage 1b — KBE (Knowledge-Base Extraction)
 
-The reason for the split between KBE and CQV is bias control. If the same
-agent read both the paper and the code, its code judgment would be
-contaminated by what the paper claims, and vice versa. Subtask isolation
-enforces this physically.
+**Entry point:** `tools/orchestrator/kbe.py :: run_kbe()`
+**Reads:** `input/paper.pdf`, `agents/knowledge-base-extraction/biostat/*.md`
+**Writes:** `kbe/kbe_output.json`, `kbe/notes.md`
 
-| Stage  | Allowed reads                                                |
-|--------|--------------------------------------------------------------|
-| KBE    | paper PDF, KBE skill + biostat templates                     |
-| CQV    | extracted code, CQV skill + references                       |
-| ER     | extracted code + lockfiles (when enabled)                    |
-| Review | KBE/CQV/ER outputs, Review skill + audit references          |
+KBE is the only agent allowed to read the manuscript. It extracts:
 
-The orchestrator (`.kilocode/workflows/ai4r.md`) spawns KBE and CQV as
-Kilo subtasks so their contexts are fresh and bounded. Review runs inline
-because it has to see everything anyway.
-
----
-
-## 5. Checklists and the static-check tool layer
-
-The pipeline is driven by two YAML rubrics, each with its own JSON Schema
-and its own generated Markdown view.
-
-| YAML                  | Schema                          | Generated view       | Items |
-|-----------------------|---------------------------------|----------------------|-------|
-| `checklist.yaml`      | `checklist.schema.json`         | `CHECKLIST.md`       | 24    |
-| `cqv_checklist.yaml`  | `cqv_checklist.schema.json`     | `CQV_CHECKLIST.md`   | 36    |
-
-Generation and validation are handled by `tools/checklist_render.py` (run
-in CI with `--all --check`). The YAML is authoritative — never hand-edit
-the Markdown.
-
-### Item types
-
-Each item declares one `check_type`:
-
-- **`static`** — implemented deterministically in
-  `tools/cqv_agent/static_checks/`. Called via `run_static_check(tool_id,
-  repo_path)`. 20 implemented; 13 stubbed with `status: not_implemented`.
-- **`dynamic`** — requires executing the submission. Implementation is
-  deferred to the ER agent.
-- **`llm`** — requires LLM judgment. The `tool_id` names a prompt template
-  rather than a Python function.
-
-### Cross-references
-
-The reproducibility YAML and the CQV YAML overlap in a controlled way.
-Items already declared in the reproducibility YAML are *not* duplicated
-in the CQV YAML; instead, `cqv_checklist.yaml` lists them in
-`also_enforces:` to record that CQV runs them on behalf of the
-reproducibility rubric.
+- **paper_title** — the only field in the entire pipeline that originates
+  from the manuscript; downstream agents copy it verbatim.
+- **Statistical methods, assumptions, data-generation process** — used by
+  the Review agent to cross-reference against the code audit.
+- **reproduction_targets** — an array of `{id, kind, label, caption,
+  what_it_shows, source_page, priority}` objects identifying the specific
+  figures, tables, and numerical results that must be reproduced. The ER
+  stage reads this array directly to know what to compare.
 
 ---
 
-## 6. Failure handling
+### 3.3 Stage 2 — ER (Experimental Run) — optional
 
-The pipeline favours degraded continuation over hard failure.
+**Entry point:** `tools/orchestrator/er.py :: run_er(enabled=False)`
+**Reads:** `input/assets/`, `kbe/kbe_output.json` (reproduction targets)
+**Writes:** `er/er_output.json`
+**CLI flag:** `--er-enabled`
 
-### Per-agent status
+When disabled (the default), ER writes `{"status": "skipped"}` and the
+rest of the pipeline treats all dynamic checklist items as unverified.
 
-Every output JSON includes a top-level `status` field with one of:
+When enabled, ER executes the submission code in an isolated Docker
+environment, collects produced outputs, and compares them against the
+manuscript reference images using perceptual hashing (pHash, threshold
+`DEFAULT_PHASH_THRESHOLD = 10`). The output `comparisons` array records
+`pass`, `fail`, `mismatch_flagged`, or `no_artifact_produced` per target.
 
-- `success` — normal completion
-- `partial` — some sections succeeded, others didn't
-- `failed`  — could not produce useful output
-- `skipped` — designated absent (currently only ER)
+---
 
-Every agent's SKILL defines the JSON shape for each of its failure modes.
-A crashed agent that writes nothing is a contract violation that hard-fails
-the workflow via `validate_review.sh`.
+### 3.4 Stage 3 — Review (Synthesis)
+
+**Entry point:** `tools/orchestrator/review.py :: run_review()`
+**Reads:** `kbe/kbe_output.json`, `cqv/cqv_output.json`, `er/er_output.json`
+**Writes:** `review/final_review.md`, `review/exhaustive_audit_report.md`,
+           `review/checklist.md`, `review/risk_matrix.json`
+
+Review is the only agent that sees all upstream outputs simultaneously.
+
+Three pre-LLM steps run before the main model call:
+
+1. **Dynamic checklist wiring** — ER comparison results are deterministically
+   mapped to checklist items (`audit-verify-figures-match`,
+   `audit-verify-tables-match`) so the LLM cannot contradict them.
+2. **Upstream-status check** — if KBE or CQV returned `failed` / `partial`,
+   dependent checklist items are pre-marked Unverified.
+3. **Checklist prompt assembly** — pre-determined verdicts are injected with
+   a "do NOT override" instruction block.
+
+After the main model call, `_normalise_core()` applies two post-processing
+rules:
+
+- **REJECT remapping** — any model output of `REJECT` is normalised to
+  `MAJOR REVISION` (REJECT is not a valid output verdict).
+- **Coherence clamp** — verdict and `risk_score` must be consistent.
+  `ACCEPT` is clamped to [0-35], `MINOR REVISION` to [15-60],
+  `MAJOR REVISION` to [40-100]. Inconsistent pairs (e.g. ACCEPT/80) are
+  silently corrected.
+
+---
+
+## 4. Context-separation policy
+
+| Stage | May read | May not read |
+|---|---|---|
+| KBE | paper PDF, KBE skill + biostat templates | code, CQV output |
+| CQV | code assets, CQV skill + references | paper PDF, KBE output |
+| ER | code assets, KBE reproduction targets | paper PDF |
+| Review | KBE + CQV + ER outputs, Review skill | raw paper PDF, raw code |
+
+The orchestrator runs KBE and CQV as isolated Python subprocesses so their
+in-memory state cannot bleed. Review runs in the main process because it
+must see everything.
+
+---
+
+## 5. Checklists
+
+The pipeline is driven by two YAML rubrics.
+
+| YAML | Schema | Rendered Markdown | Items |
+|---|---|---|---|
+| `checklist.yaml` | `checklist.schema.json` | `CHECKLIST.md` | 24 |
+| `cqv_checklist.yaml` | `cqv_checklist.schema.json` | `CQV_CHECKLIST.md` | 36 |
+
+`tools/checklist_render.py` generates and validates the Markdown views.
+The YAML is always authoritative.
+
+### Check types
+
+| `check_type` | Implemented by | Count |
+|---|---|---|
+| `static` | `tools/cqv_agent/static_checks/` (deterministic) | 33 |
+| `llm` | `tools/orchestrator/stat_judges.py` (bounded LLM call) | 16 |
+| `dynamic` | `tools/orchestrator/er.py` (requires `--er-enabled`) | varies |
+
+---
+
+## 6. Python orchestrator
+
+The primary entry point is `tools/orchestrator/run.py`.
+
+```bash
+# Standard run (ER skipped)
+python -m tools.orchestrator.run smoke-test
+
+# With experimental run enabled
+python -m tools.orchestrator.run smoke-test --er-enabled
+```
+
+The orchestrator:
+
+1. Runs `prepare_review.sh` (pre-flight: directory setup, zip extraction)
+2. Calls `run_kbe()` and `run_cqv()` (Stage 1)
+3. Calls `run_er(enabled=...)` (Stage 2, writes `{"status":"skipped"}` if off)
+4. Calls `run_review()` (Stage 3)
+5. Runs `validate_review.sh` (post-flight: schema + file presence checks)
+
+Shell log noise is suppressed at startup: `PYMUPDF_MESSAGE=0` silences
+pymupdf's layout hint; the `LiteLLM` / `litellm` loggers are set to ERROR
+so provider-failover chatter does not pollute the console.
+
+---
+
+## 7. Failure handling
+
+### Per-agent status codes
+
+Every output JSON includes a top-level `status`:
+
+| Value | Meaning |
+|---|---|
+| `success` | Normal completion |
+| `partial` | Some sections produced, others failed |
+| `failed` | Could not produce useful output |
+| `skipped` | Intentionally absent (ER when `--er-enabled` is off) |
 
 ### Upstream-failure propagation
 
-The Review agent inspects upstream `status` fields before doing any
-analysis and applies one of these rules:
-
-| Upstream                  | Review action                                                                               |
-|---------------------------|---------------------------------------------------------------------------------------------|
-| KBE `failed`/`partial`    | Items needing paper context → Unverified                                                    |
-| CQV `failed`/`partial`    | Items needing code audit → Unverified                                                       |
-| ER `skipped`              | No action (v0 default)                                                                      |
-| ER `failed` (when on)     | Execution failure recorded as a finding                                                     |
-| All upstream `failed`     | Review's own `assessment_status` becomes `failed`; verdict is `UNABLE_TO_ASSESS`            |
-
-Unverified items are explicit in `checklist.md` with the upstream failure
-quoted. They are never silently passed.
+| Upstream status | Review action |
+|---|---|
+| KBE `failed` / `partial` | Items needing paper context -> Unverified |
+| CQV `failed` / `partial` | Items needing code audit -> Unverified |
+| ER `skipped` | Dynamic items -> Unverified (no penalty) |
+| ER `failed` | Execution failure recorded as a MAJOR finding |
+| All upstream `failed` | `assessment_status = failed`, verdict = `UNABLE_TO_ASSESS` |
 
 ### Hard-failure gate
 
-`validate_review.sh` is the only place the workflow can hard-fail. It
-runs at Step 5 and exits non-zero if:
-
-- any of the 8 required output files is missing
-- any JSON file is missing required top-level keys (`paper_id`, `status`,
-  etc. — list in the script)
-- `risk_matrix.json` has an invalid verdict enum
-
-If validation fails, the orchestrator surfaces the script's output to the
-user. There is no automatic retry.
-
----
-
-## 7. Drivers and orchestration
-
-### Orchestrator
-
-[`.kilocode/workflows/ai4r.md`](.kilocode/workflows/ai4r.md) is the
-production driver. Invoked in Kilo Code via `/ai4r <review_title>`. It is
-a prompt: the LLM follows numbered steps, spawning subtasks for KBE and
-CQV and running Review inline.
-
-### Pre-flight: `prepare_review.sh`
-
-Called by the orchestrator at Step 0. Pure bash. Responsibilities:
-
-- Validate the `review_title` matches kebab-case
-- Create the `ai4r/<title>/` directory tree
-- Confirm `input/paper.pdf` exists
-- Extract any `.zip` archives in `input/assets/` via the `extract_zip` tool
-- Initialise `logs/workflow.log`
-
-Exits non-zero on any failure; the workflow refuses to continue.
-
-### Post-flight: `validate_review.sh`
-
-Called by the orchestrator at Step 5. Pure bash + Python schema check.
-Responsibilities:
-
-- Verify all 8 required output files exist and are non-empty
-- Parse each JSON output and check required top-level keys
-- Print a one-line summary per file
-- Exit non-zero on any structural defect
-
-### `assets/execute_workflow.sh` — legacy
-
-This script predates the Kilo orchestrator. It writes hand-crafted
-placeholder JSON without calling any LLM, which made it useful as a
-file-layout scaffolding test but is **not** a real driver. New work should
-use `/ai4r` in Kilo; the shell script is retained only because its file
-layout matches the orchestrator's, so it's a fast smoke test for the
-post-flight validator.
+`validate_review.sh` runs at post-flight and exits non-zero if any of the
+eight required output files is missing, any JSON is structurally invalid,
+or `risk_matrix.json` contains an unknown verdict. There is no automatic
+retry.
 
 ---
 
 ## 8. Tool registry
 
-[`tools/tools.py`](tools/tools.py) is the central registry exposing
-functions to agents via `run_tool(name, **kwargs)`. Conceptually:
+`tools/tools.py` exposes a `run_tool(name, **kwargs)` interface.
 
-- **KBE tools**: `pdf2text`, `clean_pdf_text`
-- **CQV tools**: `list_files`, `read_file`, `extract_zip`,
-  `get_dependencies`, `run_static_check`, `list_static_checks`
-- **ER tools** (when enabled): `launch_env`, `evaluate_results`, `create_file`
-- **Review tools**: (uses general-purpose file tools; no exclusive set)
+| Stage | Tools |
+|---|---|
+| KBE | `pdf2text`, `clean_pdf_text` |
+| CQV | `list_files`, `read_file`, `get_dependencies`, `extract_zip`, `run_static_check`, `list_static_checks` |
+| ER | `launch_env`, `evaluate_results`, `create_file` |
+| Review | (general file tools; no exclusive set) |
 
-The static-check dispatcher (`run_static_check`) is itself a single tool
-that internally routes to one of 33 named checks (20 working, 13 stubbed).
-This keeps the agent-facing surface small.
+`run_static_check(tool_id, repo_path)` dispatches to the relevant check
+function across six modules. All 33 checks return a real verdict; the four
+that require `tree-sitter-languages` return `not_implemented` gracefully
+when the optional dependency is absent.
 
 ---
 
 ## 9. CI and quality gates
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push
-and PR. Three gates:
+`.github/workflows/ci.yml` runs on every push and PR:
 
-1. **Checklist validation** — `python -m tools.checklist_render --all
-   --check` validates both YAMLs against their schemas and verifies the
-   generated Markdown views are in sync with their sources.
-2. **Lint** — `ruff check tools/ tests/` enforces style and catches
-   common bugs. Fixtures are excluded via `tool.ruff.extend-exclude`.
-3. **Test suite** — `pytest tests/` runs ~50 tests, primarily exercising
-   the static checks against fixture repos (`tests/fixtures/static_checks/
-   {clean,dirty}_repo/`).
+1. **Checklist validation** — `python -m tools.checklist_render --all --check`
+   validates both YAMLs against their schemas and verifies the Markdown views
+   are in sync.
+2. **Lint** — `ruff check tools/ tests/`
+3. **Tests** — `pytest tests/`  (653 tests, 1 skipped; no LLM access required)
 
-CI does not run an end-to-end pipeline test; that requires LLM access and
-is left for manual `/ai4r` invocations.
+CI does not run an end-to-end pipeline test; that requires LLM access and is
+done manually via `python -m tools.orchestrator.run smoke-test`.
 
 ---
 
 ## 10. Open work
 
-Tracked under "Sprint" comments in this conversation history; summarised
-here for visibility.
-
-- **ER agent**: not implemented. Once ready, will activate `check_type:
-  dynamic` items in both YAMLs.
-- **13 static-check stubs**: all need an AST or parser. Python side is
-  easy (`ast` stdlib); R side needs `tree-sitter-r` or shelling to
-  Rscript. The stubs return `status: not_implemented` so Review can
-  surface them as Unverified.
-- **LLM check prompts**: most `judge_*` tool_ids are placeholder names.
-  Each needs a prompt template; the statistical-validity block (7 items)
-  is the highest-leverage place to start.
-- **Adversarial review pattern**: the Review agent currently runs in a
-  single forward pass. A read-only critic + read-write synthesiser loop
-  would catch more issues.
-- **End-to-end test harness**: a tiny biostat mini-bench (~5 instances)
-  with ground-truth labels would catch regressions in the LLM-driven
-  stages.
+| Item | Status | Notes |
+|---|---|---|
+| Full ER smoke with real submission zip | Pending | First live ER validation; calibrate pHash threshold |
+| Adversarial review loop | Not started | Critic + synthesiser pass would catch more issues |
+| End-to-end mini-bench (~5 labelled instances) | Not started | Regression testing for LLM stages |
+| ER spot-check mode | Not started | Sample first N figures for rapid iteration |
 
 ---
 
 ## 11. Glossary
 
-- **Review title** — kebab-case identifier for a single submission;
-  becomes the slug under `ai4r/<title>/`. Also `paper_id` in every JSON.
-- **Reproduction item** — a specific table, figure, or numerical claim
-  from the paper that must be reproduced. KBE enumerates these from
-  the manuscript.
-- **Static check** — deterministic code analysis (regex, file glob, AST)
-  with no LLM call. Lives in `tools/cqv_agent/static_checks/`.
-- **Evidence** — for any checklist item finding, the file path (and
-  optionally line number) that supports the verdict. Findings without
-  evidence are not permitted in `risk_matrix.json`.
-- **Degraded continuation** — an agent that cannot complete still writes
-  a valid output file with `status: failed` or `partial`. Hard failures
-  are reserved for the validator.
+- **Review title** — kebab-case identifier for one submission; becomes the
+  directory slug under `ai4r/<title>/` and `paper_id` in every JSON.
+- **Reproduction target** — a specific figure, table, or numerical result
+  from the manuscript that ER must reproduce. Enumerated by KBE.
+- **Static check** — deterministic code analysis (AST, regex, file glob).
+  Returns a verdict without any LLM call.
+- **Stat judge** — one bounded LLM call evaluating a specific code-quality
+  dimension against a curated rubric. Runs in the CQV pre-pass.
+- **Evidence** — file path + line number (+ +-5-line context block after
+  rehydration) that anchors a finding. Findings without evidence are
+  not permitted in `risk_matrix.json`.
+- **Degraded continuation** — an agent that cannot complete still writes a
+  valid JSON with `status: failed` or `partial`. Hard failures are reserved
+  for the post-flight validator.
+- **Coherence clamp** — post-normalisation enforcement that verdict and
+  risk_score are consistent. ACCEPT -> risk <= 35;
+  MINOR REVISION -> risk 15-60; MAJOR REVISION -> risk >= 40.
