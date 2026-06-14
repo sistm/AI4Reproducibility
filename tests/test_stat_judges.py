@@ -235,7 +235,9 @@ def test_na_handling_rubric_requires_na_rm():
     check = _check("cqv-data-na-handling")
     rubric = check.rubric.lower()
     assert "na.rm" in rubric
-    assert "pass" in rubric and "fail" in rubric
+    assert "do not fail" in rubric       # explicit guards present
+    assert "simulation" in rubric        # simulation data guard
+    assert "unverified" in rubric        # ambiguous-origin guard
 
 
 def test_na_handling_not_applicable_on_no_evidence():
