@@ -42,8 +42,10 @@ from ._common import CheckResult, iter_source_files, read_text_safe, relpath
 try:
     import ctypes as _ct
     from pathlib import Path as _Path
+
     import tree_sitter_languages as _tsl  # type: ignore[import]
-    from tree_sitter import Language as _Language, Parser as _Parser
+    from tree_sitter import Language as _Language
+    from tree_sitter import Parser as _Parser
 
     # Locate the bundled shared library that contains all grammars.
     _so = _Path(_tsl.__file__).parent / "languages.so"
