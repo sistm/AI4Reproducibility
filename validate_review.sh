@@ -2,7 +2,7 @@
 #
 # validate_review.sh
 #
-# Post-flight for an AI4R review run. Called by the /ai4r kilocode workflow
+# Post-flight for an AI4R review run. Called by the /ai4r workflow
 # at Step 5. Verifies all required output files exist, parses the JSON
 # files, and checks that mandatory top-level keys are present.
 #

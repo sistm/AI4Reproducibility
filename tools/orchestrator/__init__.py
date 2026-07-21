@@ -1,7 +1,7 @@
 """Python orchestration layer for the AI4Reproducibility pipeline.
 
-This package is the in-progress, provider-agnostic replacement for the Kilo
-Code slash-command workflow (see LOGIC.md §7): a driver that calls LLMs via
+This package is the provider-agnostic slash-command workflow 
+(see LOGIC.md §7): a driver that calls LLMs via
 LiteLLM with per-stage system prompts and per-stage models.
 
 Importing this package does NOT require LiteLLM (or any agent runtime

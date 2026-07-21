@@ -105,7 +105,7 @@ Issues = "https://github.com/sistm/AI4Reproducibility/issues"
 
 [tool.setuptools.packages.find]
 include = ["tools*", "agents*"]
-exclude = ["tests*", "ai4r*", "assets*", ".kilocode*"]
+exclude = ["tests*", "ai4r*", "assets*"]
 
 [tool.setuptools.package-data]
 # Glob patterns are evaluated relative to each matched package directory.

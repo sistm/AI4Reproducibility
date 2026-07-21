@@ -30,10 +30,9 @@ from tools.kbe_agent.pdf2text import pdf2text as _pdf2text_raw
 # Convenience wrappers
 # ---------------------------------------------------------------------------
 # The two PDF tools return ``{"success": bool, ...}`` dicts. The pipeline
-# script (``assets/execute_workflow.sh``) treats their return values as
-# plain strings, so we keep a thin wrapper that unpacks the dict and raises
-# on failure. All other tools already return structured dicts that callers
-# inspect directly.
+# treats their return values as plain strings, so we keep a thin wrapper 
+# that unpacks the dict and raises on failure. All other tools already 
+# return structured dicts that callers inspect directly.
 
 def pdf2text(pdf_path: str) -> str:
     """Extract raw text from a PDF, raising on failure."""

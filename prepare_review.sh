@@ -2,7 +2,7 @@
 #
 # prepare_review.sh
 #
-# Pre-flight for an AI4R review run. Called by the /ai4r kilocode workflow
+# Pre-flight for an AI4R review run. Called by the /ai4r workflow
 # at Step 0. Validates inputs, creates the standard directory layout, and
 # extracts any zipped reproduction packages.
 #
